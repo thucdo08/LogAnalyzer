@@ -1,0 +1,25 @@
+{
+  "generated_at": "2025-11-08T07:28:22.875413+00:00",
+  "summary": {
+    "total_alerts": 3,
+    "severity_breakdown": {
+      "CRITICAL": 3
+    },
+    "type_breakdown": {
+      "blocked_actions_spike": 3
+    },
+    "top_subjects": [
+      "10.30.35.12",
+      "10.160.116.3",
+      "10.29.141.140"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "blocked_actions_spike",
+      "subject": "10.160.116.3",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "Phát hiện 9/9 hành động bị chặn (100.0%) từ source_ip=10.160.116.3. Chi tiết: User: ngocmai | Host: erpsrv01 Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
+      "evidence": {
+        "blocked_count": 

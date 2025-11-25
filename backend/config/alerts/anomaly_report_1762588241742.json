@@ -1,0 +1,56 @@
+{
+  "generated_at": "2025-11-08T07:50:41.742144+00:00",
+  "summary": {
+    "total_alerts": 1,
+    "severity_breakdown": {
+      "HIGH": 1
+    },
+    "type_breakdown": {
+      "anomalous_data_access": 1
+    },
+    "top_subjects": [
+      "linhfin"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "anomalous_data_access",
+      "subject": "linhfin",
+      "severity": "HIGH",
+      "score": 6.4,
+      "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user 'linhfin': Database queries tăng đột ngột: 9 (baseline: 0.0±0.1, Z=8.00)",
+      "evidence": {
+        "user": "linhfin",
+        "db_queries": 9,
+        "db_queries_baseline": 0.0,
+        "suspicious_ops": 0,
+        "suspicious_ops_baseline": 0.0,
+        "z_queries": 9.0,
+        "z_suspicious": 0.0,
+        "anomaly_score": 6.4,
+        "final_score": 6.4
+      },
+      "prompt_ctx": {
+        "user": "linhfin",
+        "group": null,
+        "behavior": {
+          "type": "anomalous_data_access",
+          "db_queries_current": 9,
+          "db_queries_baseline": 0.0,
+          "suspicious_ops_current": 0,
+          "suspicious_ops_baseline": 0.0
+        },
+        "time": null,
+        "baseline": {
+          "db_queries_mean": 0.0,
+          "db_queries_std": 0.1,
+          "suspicious_ops_mean": 0.0,
+          "suspicious_ops_std": 0.1
+        },
+        "extras": {
+          "reason": "Database queries tăng đột ngột: 9 (baseline: 0.0±0.1, Z=8.00)"
+        }
+      }
+    }
+  ]
+}

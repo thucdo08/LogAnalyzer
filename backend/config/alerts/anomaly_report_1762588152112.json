@@ -1,0 +1,92 @@
+{
+  "generated_at": "2025-11-08T07:49:12.112370+00:00",
+  "summary": {
+    "total_alerts": 8,
+    "severity_breakdown": {
+      "CRITICAL": 5,
+      "WARNING": 3
+    },
+    "type_breakdown": {
+      "ssh_bruteforce_detected": 2,
+      "blocked_actions_spike": 1,
+      "off_hours_access": 5
+    },
+    "top_subjects": [
+      "tranbinh",
+      "10.88.232.158",
+      "phamtt",
+      "sales2",
+      "10.48.132.131",
+      "lehong",
+      "sales1"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "ssh_bruteforce_detected",
+      "subject": "10.48.132.131",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "SSH brute force detected from IP 10.48.132.131: 5/5 failed attempts (100.0% failure rate).",
+      "evidence": {
+        "source_ip": "10.48.132.131",
+        "total_attempts": 5,
+        "failed_attempts": 5,
+        "failure_rate": 1.0
+      },
+      "prompt_ctx": {
+        "user": null,
+        "group": null,
+        "behavior": {
+          "type": "ssh_bruteforce",
+          "source_ip": "10.48.132.131",
+          "attempts": 5,
+          "failures": 5
+        },
+        "time": null,
+        "baseline": {
+          "expected_failure_rate": 0.1
+        },
+        "extras": {
+          "reason": "High SSH login failure rate from 10.48.132.131"
+        }
+      }
+    },
+    {
+      "type": "ssh_bruteforce_detected",
+      "subject": "10.88.232.158",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "SSH brute force detected from IP 10.88.232.158: 6/6 failed attempts (100.0% failure rate).",
+      "evidence": {
+        "source_ip": "10.88.232.158",
+        "total_attempts": 6,
+        "failed_attempts": 6,
+        "failure_rate": 1.0
+      },
+      "prompt_ctx": {
+        "user": null,
+        "group": null,
+        "behavior": {
+          "type": "ssh_bruteforce",
+          "source_ip": "10.88.232.158",
+          "attempts": 6,
+          "failures": 6
+        },
+        "time": null,
+        "baseline": {
+          "expected_failure_rate": 0.1
+        },
+        "extras": {
+          "reason": "High SSH login failure rate from 10.88.232.158"
+        }
+      }
+    },
+    {
+      "type": "blocked_actions_spike",
+      "subject": "10.88.232.158",
+      "severity": "WARNING",
+      "score": 5.454545454545454,
+      "text": "Phát hiện 6/11 hành động bị chặn (54.5%) từ source_ip=10.88.232.158. Chi tiết: User: tranbinh | Host: crm-sf01 Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
+      "evidence": {
+        "blocked_count": 

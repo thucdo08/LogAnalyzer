@@ -1,0 +1,48 @@
+{
+  "dedup_window": "60s",
+  "dedup_keys": ["source_ip","username","action","status","message"],
+  "web": {
+    "drop_static": true,
+    "static_ext": ["css","js","png","jpg","jpeg","ico","svg","gif","webp","woff","woff2","ttf","map"],
+    "allowlist_ua": ["ELB-HealthChecker", "kube-probe", "GoogleHC", "CloudFront"]
+  },
+  "firewall": {
+    "drop_protocols": ["ARP","DHCP","MDNS","SSDP","NTP","OSPF","BGP","STP"]
+  },
+  "os": {
+    "sample_login_success_per_user_per_min": 1
+  },
+  "enrich": {
+    "mask_pii": true,
+    "geoip_mmdb": "data/GeoLite2-City.mmdb",
+    "asn_mmdb":  "data/GeoLite2-ASN.mmdb"
+  },
+  "detection_rules": {
+    "suspicious_commands": [
+      {"pattern": "/etc/shadow|/etc/passwd|/etc/sudoers", "severity": "CRITICAL", "description": "Truy cập file nhạy cảm hệ thống"},
+      {"pattern": "useradd|adduser", "severity": "CRITICAL", "description": "Tạo user mới"},
+      {"pattern": "chmod\\s+\\+?[0-7]{3,4}|chown\\s+root", "severity": "WARNING", "description": "Thay đổi quyền file"},
+      {"pattern": "rm\\s+-rf\\s+/|format|mkfs", "severity": "CRITICAL", "description": "Xóa/format hệ thống"},
+      {"pattern": "nc\\s+-l|netcat.*-l|python.*-m\\s+SimpleHTTPServer", "severity": "WARNING", "description": "Mở listener/backdoor"},
+      {"pattern": "wget.*-O\\s+.*\\.sh|curl.*\\|\\s*sh|curl.*\\|\\s*bash", "severity": "CRITICAL", "description": "Tải và chạy script từ xa"}
+    ],
+    "brute_force": {
+      "threshold": 3,
+      "critical_threshold": 10
+    },
+    "sensitive_db_patterns": [
+      {"pattern": "SELECT.*FROM.*salary|SELECT.*FROM.*password|SELECT.*FROM.*credit", "severity": "CRITICAL", "description": "Truy cập dữ liệu nhạy cảm"},
+      {"pattern": "DROP\\s+TABLE|DELETE\\s+FROM.*WHERE\\s+1=1|TRUNCATE", "severity": "CRITICAL", "description": "Xóa dữ liệu database"},
+      {"pattern": "UPDATE.*SET.*password|UPDATE.*SET.*credit", "severity": "CRITICAL", "description": "Cập nhật dữ liệu nhạy cảm"}
+    ],
+    "export_patterns": [
+      {"pattern": "/export/.*\\.csv|/export/.*\\.xlsx|/download/.*\\.csv", "severity": "WARNING", "description": "Export dữ liệu CSV/Excel", "min_count": 2},
+      {"pattern": "GET.*all_customers|GET.*all_users|GET.*all_data", "severity": "WARNING", "description": "Truy xuất toàn bộ dữ liệu", "min_count": 2}
+    ],
+    "service_patterns": [
+      {"pattern": "Stopping.*NGINX|Stopping.*nginx|Stopping.*Apache", "severity": "CRITICAL", "description": "Dừng dịch vụ web"},
+      {"pattern": "Stopping.*database|Stopping.*mysql|Stopping.*postgres", "severity": "CRITICAL", "description": "Dừng dịch vụ database"},
+      {"pattern": "Stopping.*firewall|Stopping.*iptables", "severity": "CRITICAL", "description": "Dừng firewall"}
+    ]
+  }
+}

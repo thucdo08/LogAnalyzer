@@ -1,0 +1,1161 @@
+# backend/app.py
+# -*- coding: utf-8 -*-
+import sys
+import io
+# Force UTF-8 encoding for stdout
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+from dotenv import load_dotenv
+load_dotenv()
+import os
+import pandas as pd
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
+from services.preprocess import preprocess_any
+# from services.preprocess import preprocess_csv
+from services.analyzer import analyze_logs_with_openai, summarize_levels 
+from services.postprocess import postprocess
+# Lazy-import baseline/anomaly modules inside endpoints to avoid hard deps at startup
+from openai import OpenAI
+
+from services.validator import basic_validate_df
+from services.filters import reduce_noise
+from services.enrich import enrich_df
+
+import tempfile, shutil
+from datetime import datetime, timezone
+
+import os, json
+import pandas as pd
+from flask import jsonify, request, Response
+from dotenv import load_dotenv
+from flask import Response
+from flask import Response, request, jsonify
+
+from services.preprocess import preprocess_any
+from services.validator import basic_validate_df
+#from services.filters import apply_noise_filters
+# from services.enrich import enrich_df
+from services.analyzer import analyze_logs_with_openai, summarize_levels
+from services.postprocess import postprocess
+
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app)
+app.config["JSON_AS_ASCII"] = False
+
+# Ensure JSON-safe outputs (replace NaN/NaT with None, cast numpy types, format timestamps)
+def _json_safe(value):
+    import math
+    import numpy as _np
+    import pandas as _pd
+
+    if value is None:
+        return None
+    # Basic scalar conversions
+    if isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return None if math.isnan(value) else value
+    # Numpy scalar
+    if isinstance(value, (_np.integer,)):
+        return int(value)
+    if isinstance(value, (_np.floating,)):
+        return None if _np.isnan(value) else float(value)
+    if value is _np.nan:
+        return None
+    # Pandas timestamp/NaT
+    if isinstance(value, (_pd.Timestamp,)):
+        return value.isoformat()
+    # Collections
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [ _json_safe(v) for v in value ]
+    # Pandas objects
+    if isinstance(value, _pd.Series):
+        return _json_safe(value.to_dict())
+    if isinstance(value, _pd.DataFrame):
+        return _json_safe(value.to_dict(orient="records"))
+    # Fallback to string
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+# Nạp RULES
+RULES = {}
+try:
+    rules_path = os.path.join(os.path.dirname(__file__), "config", "rules.json")
+    with open(rules_path, "r", encoding="utf-8") as f:
+        RULES = json.load(f)
+except Exception:
+    RULES = {}
+
+def _rebuild_text_events(df: pd.DataFrame):
+    """Tạo lại log_text (để gọi AI) và events_per_minute từ df (đã lọc/enrich)."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return [], pd.DataFrame(columns=["timestamp", "events_per_minute"])
+    def _fmt(row):
+        # Fallback an toàn để tránh thiếu thông tin (đặc biệt với BGL)
+        host_safe = (
+            row.get("host")
+            or row.get("Node")
+            or row.get("node")
+            or ""
+        )
+        program_safe = (
+            row.get("program")
+            or row.get("component")
+            or row.get("Component")
+            or ""
+        )
+        message_safe = (
+            row.get("message")
+            or row.get("Content")
+            or row.get("event_template")
+            or row.get("EventTemplate")
+            or row.get("action")
+            or row.get("status")
+            or program_safe
+            or "(no message)"
+        )
+        action_safe = row.get("action") or ""
+        status_safe = row.get("status") or ""
+
+        parts = [
+            f"{row['timestamp']}",
+            f"IP:{row.get('source_ip','')}",
+            f"User:{row.get('username','')}",
+            f"Action:{action_safe}",
+            f"Status:{status_safe}",
+            f"Message:{message_safe}",
+        ]
+        for extra in ["event_id","level","process","method","path","http_status","program","component","host","ip_scope","geoip_country","asn_org"]:
+            if extra in df.columns:
+                val = row.get(extra, None)
+                if pd.notna(val):
+                    parts.append(f"{extra}:{val}")
+        return " - ".join(parts)
+
+    logs_text = df.apply(_fmt, axis=1).tolist()
+    df_idx = df.set_index("timestamp").sort_index()
+    events_pm = df_idx.resample("1min").size().reset_index(name="events_per_minute")
+    return logs_text, events_pm
+
+
+def _get_logs_for_alert(df: pd.DataFrame, alert: dict, lookback_minutes: int = 30) -> pd.DataFrame:
+    """
+    Lấy logs liên quan đến 1 alert để phân tích AI.
+    Strategy:
+    - Nếu alert có 'subject' là username/ip -> lọc logs của user/ip đó
+    - Nếu là timestamp alert -> lấy logs xung quanh thời gian đó
+    - Limit: tối đa 500 dòng để tránh token overhead
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    df_work = df.copy()
+    alert_type = alert.get("type", "")
+    subject = alert.get("subject", "")
+    
+    # Nếu là user-related alert
+    if "user" in alert_type and subject:
+        user_logs = df_work[df_work.get("username", pd.Series()).astype(str) == str(subject)]
+        if not user_logs.empty:
+            return user_logs.tail(500)
+    
+    # Nếu là IP-related alert
+    if "ip" in alert_type or "port" in alert_type:
+        ip_logs = df_work[
+            (df_work.get("source_ip", pd.Series()).astype(str) == str(subject)) |
+            (df_work.get("dest_ip", pd.Series()).astype(str) == str(subject))
+        ]
+        if not ip_logs.empty:
+            return ip_logs.tail(500)
+    
+    # Nếu alert có timestamp
+    try:
+        if "timestamp" in df_work.columns and subject:
+            ts = pd.to_datetime(subject, errors="coerce", utc=True)
+            if pd.notna(ts):
+                start = ts - pd.Timedelta(minutes=lookback_minutes)
+                end = ts + pd.Timedelta(minutes=lookback_minutes)
+                time_logs = df_work[
+                    (df_work["timestamp"] >= start) & (df_work["timestamp"] <= end)
+                ]
+                if not time_logs.empty:
+                    return time_logs.tail(500)
+    except Exception:
+        pass
+    
+    # Fallback: trả về logs gần nhất
+    return df_work.tail(100)
+
+@app.post("/anomaly/raw")
+def anomaly_raw():
+    """
+    Bước 2: sinh cảnh báo thô dựa trên baseline (Z-score/Moving Average...).
+    Input: multipart file + optional from/to; enrich để có ip_scope/geoip nếu cấu hình.
+    Output: { ok, alerts: [ {type, subject, severity, score, text, evidence}, ... ] }
+    """
+    try:
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "Thiếu file"}), 400
+        f = request.files["file"]
+        if f is None or f.filename == "":
+            return jsonify({"ok": False, "error": "File rỗng"}), 400
+
+        t_from = request.form.get("from")
+        t_to   = request.form.get("to")
+
+        # 1) Ingest + normalize
+        _, df_raw, _ = preprocess_any(f, filename=f.filename, start_iso=t_from, end_iso=t_to)
+
+        # 2) Reduce noise and enrich (to enable ip_scope/geoip)
+        df_used = reduce_noise(df_raw, threshold=5)
+        enrich_cfg = {
+            "mask_pii": True,
+            "geoip_mmdb": RULES.get("geoip_mmdb"),
+            "asn_mmdb": RULES.get("asn_mmdb"),
+        }
+        df_used = enrich_df(df_used, enrich_cfg)
+
+        # 3) Generate raw anomalies using stored baselines
+        from services.anomaly import generate_raw_anomalies
+        # Get log_type: try from form parameter, else detect from df
+        log_type = request.form.get("log_type", "generic")
+        if log_type == "generic" and "program" in df_used.columns:
+            programs = df_used["program"].dropna().astype(str).str.lower().unique().tolist()
+            log_type_map = {
+                "firewall": "firewall",
+                "router_ios": "router",
+                "named": "dns",
+                "winevent": "windows_eventlog",
+                "dhcpd": "dhcp",
+                "apache": "apache",
+                "squid": "proxy",
+                "suricata": "ids",
+                "edr_network": "edrnetwork",
+                "sysmon": "edr",
+                "syslog": "syslog",
+            }
+            for prog in programs:
+                for key, val in log_type_map.items():
+                    if key in prog:
+                        log_type = val
+                        break
+                if log_type != "generic":
+                    break
+        
+        base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
+        print(f"Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
+        alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
+
+        # Filter alerts by min_score (default 3.5 to reduce noise)
+        min_score = float(request.form.get("min_score", "3.5"))
+        alerts_filtered = [a for a in alerts if a.get("score", 0) >= min_score]
+
+        # Ensure all alerts have valid severity (CRITICAL, WARNING, INFO)
+        valid_severities = {"CRITICAL", "WARNING", "INFO"}
+        for a in alerts_filtered:
+            if "severity" not in a or a.get("severity") not in valid_severities:
+                # Infer severity from score if missing
+                score = a.get("score", 0)
+                if score >= 6.0:
+                    a["severity"] = "CRITICAL"
+                elif score >= 4.0:
+                    a["severity"] = "WARNING"
+                else:
+                    a["severity"] = "INFO"
+
+        # Build summary
+        from collections import Counter
+        severity_counts = Counter(a.get("severity") for a in alerts_filtered)
+        type_counts = Counter(a.get("type") for a in alerts_filtered)
+        subjects = [a.get("subject") for a in alerts_filtered if a.get("subject")]
+        
+        summary = {
+            "total_alerts": len(alerts_filtered),
+            "severity_breakdown": dict(severity_counts),
+            "type_breakdown": dict(type_counts),
+            "top_subjects": list(set(subjects))[:10],
+        }
+
+        # Save single consolidated report
+        try:
+            import time
+            custom_out = request.form.get("output_dir")
+            alerts_dir = (
+                custom_out if custom_out else os.path.join(os.path.dirname(__file__), "config", "alerts")
+            )
+            os.makedirs(alerts_dir, exist_ok=True)
+            
+            ts = int(time.time() * 1000)
+            fname = f"anomaly_report_{ts}.json"
+            fpath = os.path.join(alerts_dir, fname)
+            
+            report = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": summary,
+                "alerts": alerts_filtered,
+            }
+            
+            with open(fpath, "w", encoding="utf-8") as fo:
+                json.dump(report, fo, ensure_ascii=False, indent=2)
+            
+            saved_path = fpath
+        except Exception as ex:
+            saved_path = None
+            print(f"Error saving report: {ex}")
+
+        payload = {
+            "ok": True,
+            "summary": summary,
+            "alerts": alerts_filtered,
+            "report_path": saved_path,
+        }
+        return jsonify(_json_safe(payload))
+    except Exception as e:
+        import traceback
+        print("anomaly_raw error:", repr(e))
+        print("Traceback:", traceback.format_exc())
+        return jsonify({"ok": False, "error": f"Anomaly lỗi: {e}"}), 500
+
+@app.post("/anomaly/prompt")
+def anomaly_prompt():
+    """
+    Bước 3: nhận 1 alert (JSON) hoặc sinh prompt từ alert và gọi AI để phân tích rủi ro.
+    Input JSON body: { alert: {...} } hoặc { prompt: "..." }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        prompt = body.get("prompt")
+        if not prompt:
+            alert = body.get("alert") or {}
+            from services.anomaly import build_prompt_for_alert
+            from services.analyzer import build_detailed_prompt_from_alert
+            prompt = build_detailed_prompt_from_alert(alert)
+
+        from services.analyzer import analyze_alert_prompt
+        data, used = analyze_alert_prompt(prompt)
+        return jsonify(_json_safe({"ok": True, "used_openai": used, "report": data, "prompt": prompt}))
+    except Exception as e:
+        import traceback
+        print("anomaly_prompt error:", repr(e))
+        print("Traceback:", traceback.format_exc())
+        return jsonify({"ok": False, "error": f"Prompt lỗi: {e}"}), 500
+
+@app.post("/anomaly/batch-analyze")
+def anomaly_batch_analyze():
+    """
+    Bước 4: Nhận danh sách alerts (từ report JSON) và gửi từng cái cho AI phân tích.
+    Input JSON body: { alerts: [...] } hoặc file path
+    Output: { ok, results: [{ alert, ai_analysis }, ...], summary: {...} }
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        alerts = body.get("alerts", [])
+        
+        if not alerts:
+            # Try load from file if provided
+            report_file = body.get("report_file")
+            if report_file and os.path.exists(report_file):
+                with open(report_file, "r", encoding="utf-8") as f:
+                    report = json.load(f)
+                    alerts = report.get("alerts", [])
+        
+        if not alerts:
+            return jsonify({"ok": False, "error": "Thiếu alerts"}), 400
+        
+        from services.analyzer import build_detailed_prompt_from_alert, analyze_alert_prompt
+        
+        results = []
+        for alert in alerts:
+            try:
+                prompt = build_detailed_prompt_from_alert(alert)
+                ai_report, used = analyze_alert_prompt(prompt)
+                results.append({
+                    "alert_type": alert.get("type"),
+                    "subject": alert.get("subject"),
+                    "severity": alert.get("severity"),
+                    "score": alert.get("score"),
+                    "text": alert.get("text"),
+                    "ai_analysis": ai_report,
+                })
+            except Exception as ae:
+                print(f"Error analyzing alert {alert.get('subject')}: {ae}")
+                results.append({
+                    "alert_type": alert.get("type"),
+                    "subject": alert.get("subject"),
+                    "severity": alert.get("severity"),
+                    "score": alert.get("score"),
+                    "text": alert.get("text"),
+                    "ai_analysis": {
+                        "summary": "Lỗi phân tích",
+                        "risks": ["Không thể kết nối AI"],
+                        "risk_level": "Trung bình",
+                        "actions": ["Giám sát thêm"],
+                    },
+                })
+        
+        # Ensure all results have valid severity
+        valid_severities = {"CRITICAL", "WARNING", "INFO"}
+        for r in results:
+            if "severity" not in r or r.get("severity") not in valid_severities:
+                score = r.get("score", 0)
+                if score >= 6.0:
+                    r["severity"] = "CRITICAL"
+                elif score >= 4.0:
+                    r["severity"] = "WARNING"
+                else:
+                    r["severity"] = "INFO"
+
+        # Build summary
+        from collections import Counter
+        type_counts = Counter(r.get("alert_type") for r in results)
+        severity_counts = Counter(r.get("severity") for r in results)
+        
+        summary = {
+            "total_alerts": len(results),
+            "type_breakdown": dict(type_counts),
+            "severity_breakdown": dict(severity_counts),
+        }
+        
+        payload = {
+            "ok": True,
+            "summary": summary,
+            "results": results,
+        }
+        return jsonify(_json_safe(payload))
+    except Exception as e:
+        import traceback
+        print("anomaly_batch_analyze error:", repr(e))
+        print("Traceback:", traceback.format_exc())
+        return jsonify({"ok": False, "error": f"Batch analyze lỗi: {e}"}), 500
+
+@app.post("/analyze")
+def analyze():
+    """
+    BƯỚC 1-4 HOÀN CHỈNH: Thu thập → Tiền xử lý → Phát hiện Bất thường → Phân tích AI
+    
+    Input: multipart file (log) + optional from/to time
+    Output: {
+        ok: bool,
+        step2_summary: {...},  # raw anomalies summary
+        step3_results: [...],  # AI-analyzed alerts
+        saved_report_path: str,
+    }
+    """
+    try:
+        # === BƯỚC 1: Nhận file log thô ===
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "Thiếu file"}), 400
+        f = request.files["file"]
+        if f is None or f.filename == "":
+            return jsonify({"ok": False, "error": "File rỗng"}), 400
+
+        t_from = request.form.get("from")
+        t_to   = request.form.get("to")
+        min_score = float(request.form.get("min_score", "3.5"))
+
+        print(f"\n{'='*60}")
+        print(f"BƯỚC 1: Thu thập log thô từ {f.filename}")
+        print(f"{'='*60}")
+        
+        # === BƯỚC 2: Tiền xử lý + Lọc nhiễu + Enrich ===
+        print(f"\nBƯỚC 2: Tiền xử lý, lọc nhiễu, enrich")
+        _, df_raw, _ = preprocess_any(f, filename=f.filename, start_iso=t_from, end_iso=t_to)
+        print(f"  → Sau preprocess: {len(df_raw)} dòng")
+
+        df_used = reduce_noise(df_raw, threshold=5)
+        print(f"  → Sau lọc nhiễu: {len(df_used)} dòng")
+
+        enrich_cfg = {
+            "mask_pii": True,
+            "geoip_mmdb": RULES.get("geoip_mmdb"),
+            "asn_mmdb": RULES.get("asn_mmdb"),
+        }
+        df_used = enrich_df(df_used, enrich_cfg)
+        print(f"  → Sau enrich: {len(df_used)} dòng")
+
+        # === BƯỚC 3: Phát hiện Bất thường (Anomaly Detection) ===
+        print(f"\nBƯỚC 3: Phát hiện Bất thường từ Baseline")
+        from services.anomaly import generate_raw_anomalies
+        # Detect log_type from program column
+        log_type = request.form.get("log_type", "generic")
+        if log_type == "generic" and "program" in df_used.columns:
+            programs = df_used["program"].dropna().astype(str).str.lower().unique().tolist()
+            log_type_map = {
+                "firewall": "firewall",
+                "router_ios": "router",
+                "named": "dns",
+                "winevent": "windows_eventlog",
+                "dhcpd": "dhcp",
+                "apache": "apache",
+                "squid": "proxy",
+                "suricata": "ids",
+                "edr_network": "edrnetwork",
+                "sysmon": "edr",
+                "syslog": "syslog",
+            }
+            for prog in programs:
+                for key, val in log_type_map.items():
+                    if key in prog:
+                        log_type = val
+                        break
+                if log_type != "generic":
+                    break
+        
+        base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
+        print(f"  → Log type: {log_type}, baselines_dir={base_dir}")
+        all_alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
+        print(f"  → Tổng cảnh báo thô: {len(all_alerts)}")
+
+        # Lọc theo min_score
+        alerts_filtered = [a for a in all_alerts if a.get("score", 0) >= min_score]
+        print(f"  → Sau lọc (min_score={min_score}): {len(alerts_filtered)}")
+
+        # Ensure all alerts have valid severity
+        valid_severities = {"CRITICAL", "WARNING", "INFO"}
+        for a in alerts_filtered:
+            if "severity" not in a or a.get("severity") not in valid_severities:
+                score = a.get("score", 0)
+                if score >= 6.0:
+                    a["severity"] = "CRITICAL"
+                elif score >= 4.0:
+                    a["severity"] = "WARNING"
+                else:
+                    a["severity"] = "INFO"
+
+        # Summary bước 2
+        from collections import Counter
+        severity_counts = Counter(a.get("severity") for a in alerts_filtered)
+        type_counts = Counter(a.get("type") for a in alerts_filtered)
+        subjects = [a.get("subject") for a in alerts_filtered if a.get("subject")]
+        
+        step2_summary = {
+            "total_alerts": len(alerts_filtered),
+            "severity_breakdown": dict(severity_counts),
+            "type_breakdown": dict(type_counts),
+            "top_subjects": list(set(subjects))[:10],
+        }
+
+        # Lưu report cảnh báo thô (bước 2 output)
+        try:
+            import time
+            custom_out = request.form.get("output_dir")
+            alerts_dir = (
+                custom_out if custom_out else os.path.join(os.path.dirname(__file__), "config", "alerts")
+            )
+            os.makedirs(alerts_dir, exist_ok=True)
+            
+            ts = int(time.time() * 1000)
+            fname = f"anomaly_report_{ts}.json"
+            fpath = os.path.join(alerts_dir, fname)
+            
+            step2_report = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": step2_summary,
+                "alerts": alerts_filtered,
+            }
+            
+            with open(fpath, "w", encoding="utf-8") as fo:
+                json.dump(step2_report, fo, ensure_ascii=False, indent=2)
+            
+            saved_report_path = fpath
+            print(f"  → Lưu report cảnh báo thô: {fpath}")
+        except Exception as ex:
+            saved_report_path = None
+            print(f"  ⚠️ Error saving report: {ex}")
+
+        # === BƯỚC 4: Phân tích & Ra quyết định (AI Analysis) ===
+        print(f"\nBƯỚC 4: Gửi cảnh báo thô qua AI để phân tích chi tiết")
+        print(f"        (Lấy logs liên quan → Gọi AI → Enrich alert)")
+        from services.analyzer import build_detailed_prompt_from_alert, analyze_alert_prompt
+        
+        # === GROUP ALERTS BY SUBJECT (user/IP) ===
+        # Group alerts by subject so we analyze all behaviors of one user together
+        alerts_by_subject = {}
+        for alert in alerts_filtered:
+            subject = alert.get('subject', '(unknown)')
+            if subject not in alerts_by_subject:
+                alerts_by_subject[subject] = []
+            alerts_by_subject[subject].append(alert)
+        
+        print(f"  → Grouped {len(alerts_filtered)} alerts into {len(alerts_by_subject)} subjects")
+        
+        step3_results = []
+        subject_idx = 0
+        for subject, alerts_group in alerts_by_subject.items():
+            subject_idx += 1
+            try:
+                print(f"\n  [{subject_idx}/{len(alerts_by_subject)}] Phân tích user/IP: '{subject}' ({len(alerts_group)} alerts)")
+                
+                # === BƯỚC 3a: Lấy logs liên quan (tất cả logs của user/IP này) ===
+                # Use the first alert as template to get logs
+                first_alert = alerts_group[0]
+                related_logs_df = _get_logs_for_alert(df_used, first_alert, lookback_minutes=30)
+                logs_text, _ = _rebuild_text_events(related_logs_df)
+                print(f"       → Lấy {len(logs_text)} logs liên quan")
+                
+                # === BƯỚC 3b: Tạo prompt chi tiết từ TẤT CẢ cảnh báo của user này + logs ===
+                # Build a combined prompt with all alert types for this subject
+                alert_types = list(set(a.get("type") for a in alerts_group))
+                alert_summary = "\n".join([
+                    f"  - {a.get('type')}: {a.get('text', '')[:100]}"
+                    for a in sorted(alerts_group, key=lambda x: x.get('score', 0), reverse=True)
+                ])
+                
+                prompt = f"""Phân tích hoạt động bất thường của '{subject}':
+
+Các loại cảnh báo được phát hiện ({len(alerts_group)} tổng cộng):
+{alert_summary}
+
+Yêu cầu:
+1. Phân tích bằng TIẾNG VIỆT HOÀN TOÀN (không sử dụng tiếng Anh).
+2. Tìm mối liên hệ giữa các hành vi này.
+3. Đánh giá mức độ rủi ro tổng thể.
+4. Đề xuất hành động cụ thể.
+
+Mức độ rủi ro phải là MỘT trong những giá trị sau (chọn đúng):
+- "Thấp" (nếu rủi ro nhỏ)
+- "Trung bình" (nếu rủi ro vừa phải)
+- "Cao" (nếu rủi ro lớn)
+- "Cực kỳ nguy cấp" (nếu rủi ro rất lớn)
+
+Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì khác):
+{{
+  "summary": "Tóm tắt phân tích bằng tiếng Việt",
+  "risks": ["Rủi ro 1 bằng tiếng Việt", "Rủi ro 2 bằng tiếng Việt"],
+  "risk_level": "Chọn từ: Thấp, Trung bình, Cao, hoặc Cực kỳ nguy cấp",
+  "actions": ["Hành động 1 bằng tiếng Việt", "Hành động 2 bằng tiếng Việt"]
+}}"""
+                
+                if logs_text:
+                    logs_context = "\n".join(logs_text[:50])  # Max 50 logs để không quá dài
+                    prompt += f"\n\nLogs liên quan ({len(logs_text)} entries):\n{logs_context}"
+                
+                # === BƯỚC 3c: Gửi qua AI để phân tích (CHỈ 1 LẦN cho tất cả alerts của user) ===
+                print(f"       → Gọi AI để phân tích tất cả {len(alerts_group)} alerts cùng lúc...")
+                ai_report, used_openai = analyze_alert_prompt(prompt)
+                
+                # === BƯỚC 3d: Enrich TẤT CẢ alerts của user này với kết quả AI ===
+                # Tính toán stats từ logs (critical_count, warning_count, samples)
+                critical_count = sum(1 for log in logs_text if any(
+                    kw in log.lower() for kw in ["critical", "error", "failed", "denied", "blocked"]
+                ))
+                warning_count = sum(1 for log in logs_text if any(
+                    kw in log.lower() for kw in ["warning", "retry", "timeout", "throttle"]
+                ))
+                
+                # Add grouped result with all alerts
+                grouped_result = {
+                    "subject": subject,
+                    "alert_count": len(alerts_group),
+                    "alert_types": alert_types,
+                    "alerts": alerts_group,  # Include all individual alerts for reference
+                    "severity_max": max(a.get("severity") for a in alerts_group) if alerts_group else "INFO",
+                    "score_max": max(a.get("score", 0) for a in alerts_group) if alerts_group else 0,
+                    "related_logs_count": len(logs_text),
+                    "enriched": {
+                        "critical_count": critical_count,
+                        "warning_count": warning_count,
+                        "samples": logs_text[:5] if logs_text else [],
+                    },
+                    "ai_analysis": ai_report,
+                }
+                step3_results.append(grouped_result)
+                print(f"      [OK] Hoàn thành - Phân tích {len(alerts_group)} alerts cho '{subject}', risk_level: {ai_report.get('risk_level')}")
+                
+            except Exception as ae:
+                print(f"      [ERROR] Lỗi phân tích '{subject}': {ae}")
+                import traceback
+                print(f"      Traceback: {traceback.format_exc()}")
+                # Add error result for this subject's alerts
+                step3_results.append({
+                    "subject": subject,
+                    "alert_count": len(alerts_group),
+                    "alert_types": list(set(a.get("type") for a in alerts_group)),
+                    "alerts": alerts_group,
+                    "severity_max": max(a.get("severity") for a in alerts_group) if alerts_group else "INFO",
+                    "score_max": max(a.get("score", 0) for a in alerts_group) if alerts_group else 0,
+                    "enriched": {
+                        "critical_count": 0,
+                        "warning_count": 0,
+                        "samples": [],
+                    },
+                    "ai_analysis": {
+                        "summary": "Lỗi phân tích",
+                        "risks": ["Không thể kết nối AI hoặc lỗi xử lý"],
+                        "risk_level": "Trung bình",
+                        "actions": ["Giám sát thêm"],
+                    },
+                })
+
+        # Summary bước 4
+        step4_summary = {
+            "total_analyzed": len(step3_results),
+            "by_risk_level": dict(Counter(r.get("ai_analysis", {}).get("risk_level") for r in step3_results)),
+        }
+
+        print(f"\n{'='*60}")
+        print(f"HOÀN THÀNH QUY TRÌNH 4 BƯỚC")
+        print(f"  Bước 2 (Raw Anomalies): {step2_summary['total_alerts']} alerts")
+        print(f"  Bước 4 (AI Analysis): {step4_summary['total_analyzed']} alerts đã phân tích")
+        print(f"{'='*60}\n")
+
+        # === Response ===
+        payload = {
+            "ok": True,
+            "step2_summary": step2_summary,
+            "step3_results": step3_results,
+            "saved_report_path": saved_report_path,
+            "step4_summary": step4_summary,
+        }
+        return jsonify(_json_safe(payload))
+
+    except Exception as e:
+        import traceback
+        print("Analyze error:", repr(e))
+        print("Traceback:", traceback.format_exc())
+        return jsonify({"ok": False, "error": f"Analyze lỗi: {e}"}), 500
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+@app.get("/ai/status")
+def ai_status():
+    from services.analyzer import _make_openai_client
+    ok_env = bool(os.getenv("OPENAI_API_KEY"))
+    ok_call = False
+    err = None
+    try:
+        client = _make_openai_client()
+        if client:
+            client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role":"user","content":"ping"}],
+                max_tokens=1,
+                temperature=0
+            )
+            ok_call = True
+    except Exception as e:
+        err = str(e)
+    return {"ok_env": ok_env, "ok_call": ok_call, "error": err}
+
+
+@app.route("/export", methods=["GET", "POST"])
+def export_csv():
+    if request.method == "GET":
+        df = app.config.get("LAST_DF")
+        if df is None or not hasattr(df, "to_csv") or df.empty:
+            return Response("No data", status=404)
+        csv_data = df.to_csv(index=False)
+        return Response(
+            csv_data,
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=logs_export.csv"}
+        )
+
+    # POST: nhận file để export ngay (raw-only)
+    try:
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "Thiếu file"}), 400
+        f = request.files["file"]
+        if not f or f.filename == "":
+            return jsonify({"ok": False, "error": "File rỗng"}), 400
+
+        t_from = request.form.get("from")
+        t_to   = request.form.get("to")
+
+        # Chỉ preprocess (chuẩn hoá), không lọc, không enrich
+        logs_text, df, _ = preprocess_any(f, filename=f.filename, start_iso=t_from, end_iso=t_to)
+
+        out = df.copy()
+        out.insert(0, "log_index", range(1, len(out) + 1))
+
+        csv_bytes = out.to_csv(index=False).encode("utf-8")
+        return Response(
+            csv_bytes,
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=log_analysis_raw.csv"}
+        )
+    except Exception as e:
+        print("Export error:", repr(e))
+        return jsonify({"ok": False, "error": f"Export lỗi: {e}"}), 500
+
+
+
+
+# ==== Append/Merge helpers for baseline saving ====
+
+def _safe_load_json_df(path: str) -> pd.DataFrame:
+    try:
+        if not os.path.exists(path):
+            return pd.DataFrame()
+        return pd.read_json(path, orient="records")
+    except Exception:
+        return pd.DataFrame()
+
+def _safe_atomic_write_text(path: str, text: str, encoding="utf-8"):
+    dname = os.path.dirname(path)
+    os.makedirs(dname, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, delete=False, dir=dname) as tmp:
+        tmp.write(text)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    shutil.move(tmp_path, path)
+
+def _merge_by_key(old_df: pd.DataFrame, new_df: pd.DataFrame, key_col: str) -> pd.DataFrame:
+    """
+    Merge theo khóa:
+    - Bản ghi mới với key trùng sẽ ghi đè bản ghi cũ cùng key.
+    - Các key khác giữ nguyên.
+    """
+    if new_df is None or new_df.empty:
+        return old_df.copy()
+    if old_df is None or old_df.empty:
+        return new_df.copy()
+    if key_col not in new_df.columns:
+        return old_df.copy()
+    if key_col not in old_df.columns:
+        old_df = old_df.copy()
+        old_df[key_col] = pd.NA
+
+    # Đồng bộ cột
+    all_cols = sorted(set(old_df.columns).union(set(new_df.columns)))
+    old_df = old_df.reindex(columns=all_cols)
+    new_df = new_df.reindex(columns=all_cols)
+
+    # Loại bản ghi cũ trùng key rồi nối bản ghi mới
+    new_keys = new_df[key_col].dropna().astype(str).unique()
+    kept_old = old_df[~old_df[key_col].astype(str).isin(new_keys)]
+    merged = pd.concat([kept_old, new_df], ignore_index=True)
+
+    # Nếu vẫn còn trùng, giữ bản ghi cuối cùng theo key
+    merged = merged.dropna(subset=[key_col]).drop_duplicates(subset=[key_col], keep="last")
+    return merged
+
+def _append_global_snapshot(out_path: str, snap: dict):
+    """
+    Lưu GLOBAL baseline dạng mảng snapshot (append).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    snap_with_ts = {"trained_at": now, **snap}
+    arr = []
+    if os.path.exists(out_path):
+        try:
+            with open(out_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    arr = data
+                elif isinstance(data, dict):
+                    arr = [data]
+        except Exception:
+            arr = []
+    arr.append(snap_with_ts)
+    _safe_atomic_write_text(out_path, json.dumps(arr, ensure_ascii=False, indent=2))
+
+def _joblib_merge_dict(out_path: str, new_dict: dict):
+    """
+    joblib dict merge: load cũ (nếu có) -> update -> dump,
+    không xóa các key cũ khác.
+    """
+    old = {}  # <== QUAN TRỌNG: init sớm để tránh UnboundLocalError
+    try:
+        import joblib
+        if os.path.exists(out_path):
+            try:
+                old = joblib.load(out_path)
+            except Exception:
+                old = {}
+        if not isinstance(old, dict):
+            old = {}
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        old.update(new_dict or {})
+        joblib.dump(old, out_path)
+    except Exception as e:
+        print("joblib merge error:", e)
+
+
+def _json_merge_map(out_path: str, new_map: dict):
+    """
+    Merge dict JSON: load cũ (nếu có) rồi update key-level bằng new_map.
+    Không xóa key cũ khác nhóm.
+    """
+    old = {}  # <== init sớm
+    try:
+        if os.path.exists(out_path):
+            with open(out_path, "r", encoding="utf-8") as f:
+                old = json.load(f)
+                if not isinstance(old, dict):
+                    old = {}
+    except Exception:
+        old = {}
+
+    if isinstance(new_map, dict):
+        for k, v in (new_map or {}).items():
+            old[k] = v
+
+    _safe_atomic_write_text(out_path, json.dumps(old, ensure_ascii=False, indent=2))
+
+
+def _json_merge_groups(out_path: str, new_groups: dict):
+    """
+    Merge kiểu groups: { group: {users:[], source_ips:[], hosts:[]} }
+    Các list sẽ được union (không trùng).
+    """
+    old = {}  # <== init sớm
+    try:
+        if os.path.exists(out_path):
+            with open(out_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    old = loaded
+    except Exception:
+        pass
+
+    old = old or {}
+    for g, val in (new_groups or {}).items():
+        tgt = old.get(g, {"users": [], "source_ips": [], "hosts": []})
+        for key in ("users", "source_ips", "hosts"):
+            s_old = set(tgt.get(key, []) or [])
+            s_new = set((val or {}).get(key, []) or [])
+            tgt[key] = sorted(s_old.union(s_new))
+        old[g] = tgt
+
+    _safe_atomic_write_text(out_path, json.dumps(old, ensure_ascii=False, indent=2))
+
+
+# ===================== Baseline TRAIN endpoint (append/merge) =====================
+@app.post("/baseline/train")
+def baseline_train():
+    """
+    Train baseline và LƯU GỘP (append/merge) vào file cũ thay vì ghi đè.
+    Tự động detect log_type từ file content và lưu vào config/baselines/<log_type>/.
+    
+    Hỗ trợ:
+      - file | files (multipart)
+      - form field 'group' (mặc định gán group nếu thiếu)
+      - form field 'group_map' (JSON rule list) để map group theo source_ip/username
+      - form field 'log_type' (optional: explicit override)
+    """
+    try:
+        # Lazy imports
+        try:
+            from services.preprocess import preprocess_any
+            from services.baseline import (
+                build_user_baselines, build_device_baselines,
+                build_group_baselines, build_global_baseline,
+                apply_group_mapping, extract_group_membership
+            )
+            import joblib
+        except Exception as ie:
+            return jsonify({"ok": False, "error": f"Thiếu phụ thuộc để train baseline: {ie}"}), 500
+
+        # === Nhận files ===
+        files = request.files.getlist("files") or ([request.files.get("file")] if "file" in request.files else [])
+        if not files or not files[0]:
+            return jsonify({"ok": False, "error": "Thiếu file lịch sử để train"}), 400
+
+        # === Tham số phân nhóm ===
+        default_group = request.form.get("group")  # ví dụ "Sales"
+        group_map_raw = request.form.get("group_map")
+        group_rules = None
+        if group_map_raw:
+            try:
+                group_rules = json.loads(group_map_raw)
+                if not isinstance(group_rules, list):
+                    group_rules = None
+            except Exception:
+                group_rules = None
+
+        # === Detect log type from program column (after preprocess) ===
+        frames = []
+        detected_type = None
+        
+        for f in files:
+            try:
+                _, df_part, _ = preprocess_any(f, filename=f.filename)
+                frames.append(df_part)
+                
+                # Detect log type từ lần xử lý đầu tiên
+                if detected_type is None and "program" in df_part.columns:
+                    programs = df_part["program"].dropna().astype(str).str.lower().unique().tolist()
+                    # Map program to log type
+                    log_type_map = {
+                        "firewall": "firewall",
+                        "router_ios": "router",
+                        "named": "dns",
+                        "winevent": "windows_eventlog",
+                        "dhcpd": "dhcp",
+                        "apache": "apache",
+                        "squid": "proxy",
+                        "suricata": "ids",
+                        "edr_network": "edrnetwork",
+                        "edr_sysmon": "edr",
+                        "sysmon": "edr",
+                        "syslog": "syslog",
+                    }
+                    for prog in programs:
+                        for key, val in log_type_map.items():
+                            if key in prog:
+                                detected_type = val
+                                break
+                        if detected_type:
+                            break
+            except Exception as fe:
+                print("Baseline train: skip file due to error:", f.filename, fe)
+        
+        if not frames:
+            return jsonify({"ok": False, "error": "Không đọc được dữ liệu hợp lệ"}), 400
+
+        df_hist = pd.concat(frames, ignore_index=True, sort=False)
+        df_hist = df_hist.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+        # Use explicit log_type from form if provided, else use detected, else default to generic
+        log_type = request.form.get("log_type") or detected_type or "generic"
+        print(f"Baseline train: log_type={log_type}, detected={detected_type}, rows={len(df_hist)}")
+
+        # === Áp nhóm nếu người dùng truyền ===
+        if default_group or group_rules:
+            df_hist = apply_group_mapping(df_hist, rules=group_rules, default_group=default_group)
+
+        # === Train ===
+        user_stats, user_models = build_user_baselines(df_hist)
+        device_stats, device_models = build_device_baselines(df_hist)
+        # Group baseline (không raise dù thiếu cột)
+        try:
+            group_stats, group_models = build_group_baselines(df_hist, group_col="group", default_group=default_group)
+        except Exception:
+            group_stats, group_models = pd.DataFrame(), {}
+        global_stats = build_global_baseline(df_hist)
+
+        # === LƯU GỘP (append/merge) - all in one common baselines folder ===
+        base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
+        out_dir = base_root  # All baselines go to config/baselines/ (no log_type subfolder)
+        os.makedirs(out_dir, exist_ok=True)
+
+        # 1) USER STATS (merge theo 'username')
+        user_stats_path = os.path.join(out_dir, "user_stats.json")
+        old_user = _safe_load_json_df(user_stats_path)
+        if "username" not in user_stats.columns:
+            user_stats = user_stats.copy()
+            user_stats["username"] = "(unknown)"
+        merged_user = _merge_by_key(old_user, user_stats, key_col="username")
+        _safe_atomic_write_text(user_stats_path, merged_user.to_json(orient="records", force_ascii=False))
+
+        # 2) DEVICE STATS (merge theo 'host' nếu có, else 'source_ip', else append)
+        device_stats_path = os.path.join(out_dir, "device_stats.json")
+        old_dev = _safe_load_json_df(device_stats_path)
+        dev_key = "host" if "host" in device_stats.columns else ("source_ip" if "source_ip" in device_stats.columns else None)
+        if dev_key:
+            merged_dev = _merge_by_key(old_dev, device_stats, key_col=dev_key)
+        else:
+            merged_dev = pd.concat([old_dev, device_stats], ignore_index=True)
+        _safe_atomic_write_text(device_stats_path, merged_dev.to_json(orient="records", force_ascii=False))
+
+        # 3) GROUP STATS (merge theo 'group')
+        group_stats_path = os.path.join(out_dir, "group_stats.json")
+        old_group = _safe_load_json_df(group_stats_path)
+        if not group_stats.empty:
+            if "group" not in group_stats.columns:
+                if "department" in group_stats.columns:
+                    group_stats = group_stats.rename(columns={"department": "group"})
+                else:
+                    group_stats = group_stats.copy()
+                    group_stats["group"] = "(unknown)"
+            merged_group = _merge_by_key(old_group, group_stats, key_col="group")
+        else:
+            merged_group = old_group
+        _safe_atomic_write_text(group_stats_path, merged_group.to_json(orient="records", force_ascii=False))
+
+        # 4) GLOBAL BASELINE (append snapshot)
+        global_path = os.path.join(out_dir, "global_baseline.json")
+        _append_global_snapshot(global_path, global_stats)
+
+        # 5) MODELS (update dict, không xoá model cũ)
+        _joblib_merge_dict(os.path.join(out_dir, "user_models.joblib"),   user_models)
+        _joblib_merge_dict(os.path.join(out_dir, "device_models.joblib"), device_models)
+        _joblib_merge_dict(os.path.join(out_dir, "group_models.joblib"),  group_models)
+
+        # 6) MEMBERSHIP EXPORT (ai thuộc nhóm nào)
+        members = extract_group_membership(df_hist, group_col="group")
+        members_dir = os.path.join(out_dir, "members")
+        os.makedirs(members_dir, exist_ok=True)
+        _json_merge_groups(os.path.join(members_dir, "group_members.json"), members.get("groups", {}))
+        _json_merge_map(os.path.join(members_dir, "user_to_group.json"),   members.get("user_to_group", {}))
+        _json_merge_map(os.path.join(members_dir, "device_to_group.json"), members.get("device_to_group", {}))
+
+        return jsonify({
+            "ok": True,
+            "rows": int(len(df_hist)),
+            "log_type": log_type,
+            "paths": {
+                "user_stats": "config/baselines/user_stats.json",
+                "device_stats": "config/baselines/device_stats.json",
+                "group_stats": "config/baselines/group_stats.json",
+                "global_baseline": "config/baselines/global_baseline.json",
+                "user_models": "config/baselines/user_models.joblib",
+                "device_models": "config/baselines/device_models.joblib",
+                "group_models": "config/baselines/group_models.joblib",
+                "group_members": "config/baselines/members/group_members.json",
+                "user_to_group": "config/baselines/members/user_to_group.json",
+                "device_to_group": "config/baselines/members/device_to_group.json",
+            },
+            "merge": "append+override-by-key"
+        })
+
+    except Exception as e:
+        import traceback
+        print("Baseline train error:", repr(e))
+        print("Traceback:", traceback.format_exc())
+        return jsonify({"ok": False, "error": f"Baseline train lỗi: {e}"}), 500
+
+
+# ===================== Membership viewer (optional) =====================
+@app.get("/baseline/groups")
+def baseline_groups():
+    """
+    Xem nhanh membership đã lưu: group_members / user_to_group / device_to_group
+    Tất cả baselines được lưu trong chung 1 thư mục config/baselines/
+    """
+    try:
+        base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
+        
+        out = {}
+        members_dir = os.path.join(base_root, "members")
+        
+        for name in ["group_members.json", "user_to_group.json", "device_to_group.json"]:
+            p = os.path.join(members_dir, name)
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    out[name] = json.load(f)
+            else:
+                out[name] = None
+        
+        # Also show baseline files info
+        out["baseline_files"] = []
+        for fname in ["user_stats.json", "device_stats.json", "group_stats.json", "global_baseline.json"]:
+            fpath = os.path.join(base_root, fname)
+            if os.path.exists(fpath):
+                out["baseline_files"].append(fname)
+        
+        return jsonify({"ok": True, "baselines_location": f"config/baselines/", **out})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port, debug=True)

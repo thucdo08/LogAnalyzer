@@ -1,0 +1,23 @@
+{
+  "generated_at": "2025-11-06T09:49:02.862337+00:00",
+  "summary": {
+    "total_alerts": 1,
+    "severity_breakdown": {
+      "CRITICAL": 1
+    },
+    "type_breakdown": {
+      "blocked_actions_spike": 1
+    },
+    "top_subjects": [
+      "10.233.64.205"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "blocked_actions_spike",
+      "subject": "10.233.64.205",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "Phát hiện 8/8 hành động bị chặn (100.0%) từ source_ip=10.233.64.205. Chi tiết: Host: fw01 | Target: 10.187.20.161 Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
+      "evidence": {
+        "blocked_count": 

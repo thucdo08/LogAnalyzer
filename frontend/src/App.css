@@ -1,0 +1,10 @@
+.p-fileupload-buttonbar {
+  display: flex !important;
+  justify-content: center;
+  gap: 0.75rem; /* khoảng cách giữa các nút */
+}
+
+/* chỉnh độ rộng nút */
+.p-fileupload-buttonbar .p-button {
+  min-width: 100px; /* tùy chỉnh lớn hơn nếu cần */
+}

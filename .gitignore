@@ -1,0 +1,15 @@
+# Chặn file môi trường (chứa mật khẩu)
+.env
+.env.*
+
+
+
+# Chặn thư mục môi trường ảo Python
+venv/
+env/
+.venv/
+__pycache__/
+
+# Chặn thư mục thư viện Javascript
+node_modules/
+

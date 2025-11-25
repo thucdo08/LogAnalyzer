@@ -1,0 +1,570 @@
+import React, { useState, useMemo } from "react";
+import { FileUpload } from "primereact/fileupload";
+import "primereact/resources/themes/lara-light-blue/theme.css";
+import "primereact/resources/primereact.min.css";
+import "primeicons/primeicons.css";
+import "./App.css";
+
+const API_BASE = "http://localhost:8000";
+
+export default function App() {
+  // dữ liệu
+  const [status, setStatus] = useState("");
+  const [preview, setPreview] = useState([]);
+
+  const [resultsUp, setResultsUp] = useState([]);   // đã hậu xử lý
+  const [summaryUp, setSummaryUp] = useState({});
+  const [resultsRaw, setResultsRaw] = useState([]); // AI gốc
+  const [summaryRaw, setSummaryRaw] = useState({});
+  const [eventsPM, setEventsPM] = useState([]);
+
+  // bổ sung hiển thị
+  const [providerOpenAI, setProviderOpenAI] = useState(null); // true/false/null
+  const [stats, setStats] = useState(null);                   // {raw_rows, shown_rows, dedup_dropped}
+  const [validateReport, setValidateReport] = useState(null); // {ok, issues[], info{time_range, rows, columns}}
+
+  // anomaly detection results
+  const [anomalyReport, setAnomalyReport] = useState(null);   // step2_summary (raw anomalies)
+  const [anomalyAnalyzed, setAnomalyAnalyzed] = useState(null); // step3_results (AI-analyzed)
+  const [anomalySummary, setAnomalySummary] = useState(null);   // step4_summary
+  const [anomalyStatus, setAnomalyStatus] = useState("");
+
+  // điều khiển hiển thị
+  const [viewMode, setViewMode] = useState("upgraded"); // 'upgraded' | 'raw' | 'anomalies'
+  const [anomalyFilterLevel, setAnomalyFilterLevel] = useState(""); // Filter anomalies by risk level
+  const [anomalyFilterType, setAnomalyFilterType] = useState("");   // Filter anomalies by type
+  const [query, setQuery] = useState("");
+  const [selectedLevels, setSelectedLevels] = useState(
+    new Set(["CRITICAL", "WARNING", "INFO"])
+  );
+
+  // lọc theo thời gian
+  const [fromTs, setFromTs] = useState("");
+  const [toTs, setToTs] = useState("");
+
+  // giữ file để export (server)
+  const [lastFile, setLastFile] = useState(null);
+
+  async function uploadHandler(e) {
+    try {
+      const file = (e.files && e.files[0]) || null;
+      if (!file) {
+        setStatus("Vui lòng chọn một file.");
+        return;
+      }
+      setLastFile(file);
+
+      setStatus("⏳ Đang tải & phân tích...");
+      setPreview([]); setResultsUp([]); setSummaryUp({});
+      setResultsRaw([]); setSummaryRaw({}); setEventsPM([]);
+      setProviderOpenAI(null); setStats(null); setValidateReport(null);
+      setAnomalyReport(null); setAnomalyAnalyzed(null); setAnomalySummary(null);
+
+      const fd = new FormData();
+      fd.append("file", file);
+      if (fromTs) fd.append("from", new Date(fromTs).toISOString());
+      if (toTs)   fd.append("to",   new Date(toTs).toISOString());
+
+      const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data?.error || "API error");
+
+      // Handle NEW 4-step response structure
+      setAnomalyReport(data.step2_summary || null);      // Raw anomalies
+      setAnomalyAnalyzed(data.step3_results || null);    // AI-analyzed alerts
+      setAnomalySummary(data.step4_summary || null);     // Summary of AI analysis
+      
+      // Fallback: if old response structure (for backward compatibility)
+      setPreview(data.preview || []);
+      setResultsUp(data.results || []);
+      setSummaryUp(data.summary || {});
+      setResultsRaw(data.results_raw || []);
+      setSummaryRaw(data.summary_raw || {});
+      setEventsPM(data.events_per_minute || []);
+      setProviderOpenAI(typeof data.used_openai === "boolean" ? data.used_openai : null);
+      setStats(data.stats || null);
+      setValidateReport(data.validate_report || null);
+
+      // Auto-switch to anomalies view if we have anomaly data
+      if (data.step3_results?.length) {
+        setViewMode("anomalies");
+      } else {
+        setViewMode("upgraded");
+      }
+      setStatus("✅ Hoàn tất");
+    } catch (err) {
+      console.error(err);
+      setStatus("❌ Lỗi: " + (err?.message || "Không xác định"));
+    }
+  }
+
+  
+
+  // export CSV (client)
+  function exportCSVClient() {
+    const rows = activeResults;
+    const headers = ["log_index", "level", "summary", "suggestion", "collapsed_count", "upgrade_reason"];
+    const esc = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    const csv = [
+      headers.join(","),
+      ...rows.map((r) =>
+        [r.log_index, r.level, esc(r.summary), esc(r.suggestion), r.collapsed_count ?? 1, r.upgrade_reason ?? ""].join(",")
+      ),
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = viewMode === "upgraded" ? "log_analysis_upgraded.csv" : "log_analysis_raw.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // export CSV (server)
+  async function exportCSVServer() {
+    try {
+      if (!lastFile) {
+        alert("Hãy phân tích (upload) ít nhất một lần trước khi export từ server.");
+        return;
+      }
+      setStatus("⏳ Đang xuất CSV từ server...");
+      const fd = new FormData();
+      fd.append("file", lastFile);
+      if (fromTs) fd.append("from", new Date(fromTs).toISOString());
+      if (toTs)   fd.append("to", new Date(toTs).toISOString());
+
+      const res = await fetch(`${API_BASE}/export`, { method: "POST", body: fd });
+      if (!res.ok) throw new Error("Export server thất bại");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "log_analysis_upgraded.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus("✅ Đã tải CSV từ server");
+    } catch (e) {
+      console.error(e);
+      setStatus("❌ Lỗi export server: " + (e?.message || "Không xác định"));
+    }
+  }
+
+  // badge
+  const Badge = ({ level, children }) => {
+    const cls =
+      level === "CRITICAL"
+        ? "bg-red-100 text-red-800"
+        : level === "WARNING"
+        ? "bg-orange-100 text-orange-800"
+        : "bg-sky-100 text-sky-800";
+    return (
+      <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${cls}`}>
+        {children}
+      </span>
+    );
+  };
+
+  // kết quả theo chế độ xem + filter + search
+  const activeResults = useMemo(() => {
+    const base =
+      viewMode === "upgraded"
+        ? resultsUp
+        : (resultsRaw || []).map((r, idx) => ({
+            log_index: r.log_index ?? idx + 1,
+            level: r.level,
+            summary: r.summary,
+            suggestion: r.suggestion,
+            // raw chưa có count/reason
+          }));
+
+    const q = (query || "").toLowerCase().trim();
+    return base.filter(
+      (r) =>
+        selectedLevels.has(String(r.level).toUpperCase()) &&
+        (!q ||
+          String(r.summary || "").toLowerCase().includes(q) ||
+          String(r.suggestion || "").toLowerCase().includes(q))
+    );
+  }, [viewMode, resultsUp, resultsRaw, selectedLevels, query]);
+
+  // thống kê theo chế độ xem
+  const activeSummary = useMemo(
+    () => (viewMode === "upgraded" ? summaryUp : summaryRaw) || {},
+    [viewMode, summaryUp, summaryRaw]
+  );
+
+  function toggleLevel(lv) {
+    setSelectedLevels((prev) => {
+      const next = new Set(prev);
+      if (next.has(lv)) next.delete(lv);
+      else next.add(lv);
+      return next;
+    });
+  }
+
+  function resetFilters() {
+    setSelectedLevels(new Set(["CRITICAL", "WARNING", "INFO"]));
+    setQuery("");
+  }
+
+  const providerChip =
+    providerOpenAI == null
+      ? null
+      : providerOpenAI
+      ? <span className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-semibold">Provider: OpenAI</span>
+      : <span className="px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold">Provider: Heuristic</span>;
+
+  const showingChip = (
+    <span className="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-semibold">
+      {stats?.raw_rows
+        ? `Showing ${stats.shown_rows} of ${stats.raw_rows} (−${stats.dedup_dropped})`
+        : `Showing ${activeResults.length} rows`}
+    </span>
+  );
+
+  const timeRangeChip =
+    validateReport?.info?.time_range
+      ? <span className="px-2 py-1 rounded-lg bg-sky-50 text-sky-700 text-xs font-semibold">
+          Time: {validateReport.info.time_range[0]} → {validateReport.info.time_range[1]}
+        </span>
+      : null;
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-6">
+      <div className="max-w-6xl mx-auto bg-white rounded-xl shadow-lg p-6">
+        <h1 className="text-2xl font-bold text-slate-800">📊 Log Analyzer</h1>
+        <p className="text-slate-500 mt-1">
+          Tải file log (.csv, .json, .ndjson, .txt, .log) → chuẩn hoá → lọc nhiễu → enrich → AI → hậu xử lý.
+        </p>
+
+        {/* Upload */}
+        <div className="mt-5 flex justify-center">
+          <div className="w-full max-w-xl">
+            <FileUpload
+              name="file"
+              accept=".csv,.json,.ndjson,.txt,.log"
+              customUpload
+              uploadHandler={uploadHandler}
+              mode="advanced"
+              chooseLabel="Chọn file"
+              uploadLabel="Tải lên & phân tích"
+              cancelLabel="Hủy"
+              emptyTemplate={
+                <div className="flex flex-col items-center justify-center text-gray-500 py-8">
+                  <i className="pi pi-cloud-upload text-4xl mb-3 text-blue-500"></i>
+                  <p>
+                    Kéo & thả file vào đây hoặc bấm{" "}
+                    <span className="font-semibold">Chọn file</span>.
+                  </p>
+                </div>
+              }
+            />
+            <div className="text-slate-500 mt-2">{status}</div>
+          </div>
+        </div>
+
+        {/* Controls */}
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded-lg overflow-hidden border border-slate-200">
+            <button
+              onClick={() => setViewMode("upgraded")}
+              className={`px-3 py-2 text-sm ${viewMode === "upgraded" ? "bg-sky-600 text-white" : "bg-white text-slate-700"}`}
+              title="Hiển thị sau hậu xử lý (nâng cấp mức độ)"
+            >
+              Sau hậu xử lý
+            </button>
+            <button
+              onClick={() => setViewMode("raw")}
+              className={`px-3 py-2 text-sm ${viewMode === "raw" ? "bg-sky-600 text-white" : "bg-white text-slate-700"}`}
+              title="Kết quả phân tích AI gốc"
+            >
+              AI gốc
+            </button>
+            <button
+              onClick={() => setViewMode("anomalies")}
+              className={`px-3 py-2 text-sm ${viewMode === "anomalies" ? "bg-purple-600 text-white" : "bg-white text-slate-700"}`}
+              title="Phát hiện bất thường + AI phân tích"
+            >
+              🔍 Anomalies (4-step)
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 ml-2">
+            {["CRITICAL", "WARNING", "INFO"].map((lv) => (
+              <label key={lv} className="flex items-center gap-1 text-sm text-slate-700">
+                <input type="checkbox" checked={selectedLevels.has(lv)} onChange={() => toggleLevel(lv)} />
+                <span>{lv}</span>
+                {activeSummary?.[lv] != null && <span className="text-slate-400">({activeSummary[lv]})</span>}
+              </label>
+            ))}
+          </div>
+
+          {/* Anomaly-specific filters */}
+          {viewMode === "anomalies" && anomalyAnalyzed?.length > 0 && (
+            <div className="flex items-center gap-2 ml-2">
+              <select 
+                value={anomalyFilterType} 
+                onChange={(e) => setAnomalyFilterType(e.target.value)}
+                className="px-2 py-1 border rounded text-sm bg-white"
+              >
+                <option value="">All Types</option>
+                {[...new Set((anomalyAnalyzed || []).map(a => a.alert_type))].map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+              <select 
+                value={anomalyFilterLevel} 
+                onChange={(e) => setAnomalyFilterLevel(e.target.value)}
+                className="px-2 py-1 border rounded text-sm bg-white"
+              >
+                <option value="">All Risk Levels</option>
+                <option value="Thấp">Thấp (Low)</option>
+                <option value="Trung bình">Trung bình (Medium)</option>
+                <option value="Cao">Cao (High)</option>
+                <option value="Cực kỳ nguy cấp">Cực kỳ nguy cấp (Critical)</option>
+              </select>
+            </div>
+          )}
+
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Tìm theo tóm tắt / gợi ý…"
+            className="flex-1 min-w-[220px] px-3 py-2 border rounded-lg text-sm outline-none focus:ring-2 ring-sky-300"
+          />
+
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-slate-700">Từ</label>
+            <input type="datetime-local" value={fromTs} onChange={(e) => setFromTs(e.target.value)} className="px-2 py-1 border rounded" />
+            <label className="text-sm text-slate-700">Đến</label>
+            <input type="datetime-local" value={toTs} onChange={(e) => setToTs(e.target.value)} className="px-2 py-1 border rounded" />
+          </div>
+
+          <button onClick={resetFilters} className="px-3 py-2 text-sm rounded-lg border bg-white hover:bg-slate-50">
+            Xoá lọc
+          </button>
+
+          <button onClick={exportCSVClient} className="px-3 py-2 text-sm rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">
+            ⬇️ Export CSV (client)
+          </button>
+          <button onClick={exportCSVServer} className="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">
+            ⬇️ Export CSV (server)
+          </button>
+          
+        </div>
+
+        {/* Banner chips */}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {providerChip}
+          {showingChip}
+          {timeRangeChip}
+          {stats?.alerts != null && (
+            <span className="px-2 py-1 rounded-lg bg-purple-50 text-purple-700 text-xs font-semibold">
+              Alerts (analyze): {stats.alerts}
+            </span>
+          )}
+          
+        </div>
+
+        {/* Data quality */}
+        {validateReport && (
+          <div className="mt-4 border rounded-lg p-3 bg-slate-50">
+            <div className="flex items-center justify-between">
+              <div className="font-semibold text-slate-700">🩺 Data quality</div>
+              <div className={`text-xs px-2 py-0.5 rounded ${validateReport.ok ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                {validateReport.ok ? "OK" : "Needs attention"}
+              </div>
+            </div>
+            {!validateReport.ok && (
+              <ul className="list-disc ml-5 mt-2 text-sm text-amber-700">
+                {(validateReport.issues || []).map((it, idx) => <li key={idx}>{it}</li>)}
+              </ul>
+            )}
+            <div className="mt-2 text-xs text-slate-600">
+              Rows: {validateReport.info?.rows ?? "?"} · Columns: {Array.isArray(validateReport.info?.columns) ? validateReport.info.columns.length : "?"}
+            </div>
+          </div>
+        )}
+
+        {/* Bảng kết quả + Anomaly Results */}
+        <h2 className="text-xl font-semibold text-slate-800 mt-6">📑 Kết quả phân tích</h2>
+
+        {/* ANOMALY DETECTION RESULTS (4-STEP) */}
+        {viewMode === "anomalies" ? (
+          (anomalyReport || anomalyAnalyzed) ? (
+          <div className="mt-4 space-y-4">
+            {/* Step 2: Raw Anomalies Summary */}
+            {anomalyReport && (
+              <div className="border rounded-lg p-4 bg-purple-50">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-purple-900">📊 Phát hiện Bất thường (Raw Anomalies)</h3>
+                  <span className="px-3 py-1 rounded-lg bg-purple-100 text-purple-700 text-sm font-semibold">
+                    {anomalyReport.total_alerts} alerts
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
+                  <div className="bg-white p-3 rounded border-l-4 border-red-500">
+                    <div className="text-xs text-slate-600">CRITICAL</div>
+                    <div className="text-2xl font-bold text-red-600">{anomalyReport.severity_breakdown?.CRITICAL || 0}</div>
+                  </div>
+                  <div className="bg-white p-3 rounded border-l-4 border-orange-500">
+                    <div className="text-xs text-slate-600">WARNING</div>
+                    <div className="text-2xl font-bold text-orange-600">{anomalyReport.severity_breakdown?.WARNING || 0}</div>
+                  </div>
+                  <div className="bg-white p-3 rounded border-l-4 border-yellow-500">
+                    <div className="text-xs text-slate-600">INFO</div>
+                    <div className="text-2xl font-bold text-yellow-600">{anomalyReport.severity_breakdown?.INFO || 0}</div>
+                  </div>
+                </div>
+                <div className="mt-3 text-sm text-slate-700">
+                  <strong>Alert Types:</strong> {Object.entries(anomalyReport.type_breakdown || {}).map(([k, v]) => `${k}: ${v}`).join(", ")}
+                </div>
+              </div>
+            )}
+
+            {/* Step 4: AI-Analyzed Results */}
+            {anomalyAnalyzed && anomalyAnalyzed.length > 0 && (
+              <div className="border rounded-lg p-4 bg-indigo-50">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-lg font-semibold text-indigo-900">🤖 Phân tích từ AI</h3>
+                  <span className="px-3 py-1 rounded-lg bg-indigo-100 text-indigo-700 text-sm font-semibold">
+                    {anomalyAnalyzed.length} alerts analyzed
+                  </span>
+                </div>
+                
+                {/* AI Analysis Summary */}
+                {anomalySummary && (
+                  <div className="mb-3 p-3 bg-white rounded border-l-4 border-indigo-500">
+                    <div className="text-xs text-slate-600 mb-1">Risk Level Breakdown</div>
+                    <div className="flex gap-2 flex-wrap">
+                      {Object.entries(anomalySummary.by_risk_level || {}).map(([level, count]) => (
+                        <span key={level} className="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-sm">
+                          {level}: {count}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI Alerts Cards */}
+                <div className="space-y-2">
+                  {(() => {
+                    let filtered = anomalyAnalyzed || [];
+                    if (anomalyFilterType) {
+                      filtered = filtered.filter(a => a.alert_type === anomalyFilterType);
+                    }
+                    if (anomalyFilterLevel) {
+                      filtered = filtered.filter(a => a.ai_analysis?.risk_level === anomalyFilterLevel);
+                    }
+                    
+                    if (!filtered.length) {
+                      return <div className="text-slate-500 text-sm">Không có kết quả.</div>;
+                    }
+
+                    return filtered.map((alert, idx) => {
+                      const riskColor = 
+                        alert.ai_analysis?.risk_level === "Cực kỳ nguy cấp" ? "red" :
+                        alert.ai_analysis?.risk_level === "Cao" ? "orange" :
+                        alert.ai_analysis?.risk_level === "Trung bình" ? "yellow" : "green";
+                      
+                      return (
+                        <div key={idx} className="bg-white p-3 rounded border-l-4 border-indigo-400">
+                          <div className="flex items-start justify-between mb-2">
+                            <div>
+                              <div className="font-semibold text-slate-800">{alert.subject}</div>
+                              <div className="text-xs text-slate-600">{alert.alert_type}</div>
+                            </div>
+                            <div className={`px-2 py-1 rounded text-sm font-semibold bg-${riskColor}-100 text-${riskColor}-700`}>
+                              {alert.ai_analysis?.risk_level || "Unknown"}
+                            </div>
+                          </div>
+                          
+                          <div className="text-sm text-slate-700 mb-2">
+                            <strong>Sự kiện:</strong> {alert.text}
+                          </div>
+                          
+                          <div className="text-sm mb-2">
+                            <strong>Tóm tắt phân tích:</strong>
+                            <div className="text-slate-700 mt-1">{alert.ai_analysis?.summary}</div>
+                          </div>
+                          
+                          {alert.ai_analysis?.risks && alert.ai_analysis.risks.length > 0 && (
+                            <div className="text-sm mb-2">
+                              <strong>Rủi ro:</strong>
+                              <ul className="list-disc ml-5 text-slate-700 mt-1">
+                                {alert.ai_analysis.risks.map((risk, i) => (
+                                  <li key={i}>{risk}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          
+                          {alert.ai_analysis?.actions && alert.ai_analysis.actions.length > 0 && (
+                            <div className="text-sm">
+                              <strong>Hành động đề xuất:</strong>
+                              <ul className="list-disc ml-5 text-slate-700 mt-1">
+                                {alert.ai_analysis.actions.map((action, i) => (
+                                  <li key={i}>{action}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          
+                          <div className="text-xs text-slate-500 mt-2 flex gap-2">
+                            <span>Score: {alert.score?.toFixed(2)}</span>
+                            <span>Severity: {alert.severity}</span>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+            ) : (
+              <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                <p className="text-slate-500 text-sm">Chưa có dữ liệu.</p>
+              </div>
+            )
+        ) : (
+          <div className="overflow-x-auto mt-2">
+          <table className="min-w-full border-collapse">
+            <thead>
+              <tr className="bg-slate-50 text-slate-600">
+                <th className="text-left py-2 px-3">#</th>
+                <th className="text-left py-2 px-3">Count</th>
+                <th className="text-left py-2 px-3">Level</th>
+                <th className="text-left py-2 px-3">Tóm tắt</th>
+                <th className="text-left py-2 px-3">Gợi ý</th>
+                <th className="text-left py-2 px-3">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activeResults.length ? (
+                activeResults.map((r, idx) => (
+                  <tr key={`${r.log_index}-${idx}`} className="border-b last:border-0 hover:bg-slate-50">
+                    <td className="py-2 px-3">{r.log_index ?? idx + 1}</td>
+                    <td className="py-2 px-3">{r.collapsed_count ?? 1}</td>
+                    <td className="py-2 px-3"><Badge level={r.level}>{r.level}</Badge></td>
+                    <td className="py-2 px-3">{r.summary}</td>
+                    <td className="py-2 px-3">{r.suggestion}</td>
+                    <td className="py-2 px-3">{r.upgrade_reason || ""}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td className="py-3 px-3 text-slate-500" colSpan={6}>
+                    Chưa có dữ liệu.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        )}
+
+      </div>
+    </div>
+  );
+}

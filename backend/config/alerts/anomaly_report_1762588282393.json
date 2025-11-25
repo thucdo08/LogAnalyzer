@@ -1,0 +1,106 @@
+{
+  "generated_at": "2025-11-08T07:51:22.393498+00:00",
+  "summary": {
+    "total_alerts": 3,
+    "severity_breakdown": {
+      "HIGH": 1,
+      "WARNING": 2
+    },
+    "type_breakdown": {
+      "anomalous_data_access": 1,
+      "new_user": 2
+    },
+    "top_subjects": [
+      "operator",
+      "unknown",
+      "(unknown)(via admin2)"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "anomalous_data_access",
+      "subject": "(unknown)(via admin2)",
+      "severity": "HIGH",
+      "score": 6.4,
+      "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user '(unknown)(via admin2)': Database queries tăng đột ngột: 53 (baseline: 0.0±0.1, Z=8.00)",
+      "evidence": {
+        "user": "(unknown)(via admin2)",
+        "db_queries": 53,
+        "db_queries_baseline": 0.0,
+        "suspicious_ops": 0,
+        "suspicious_ops_baseline": 0.0,
+        "z_queries": 53.0,
+        "z_suspicious": 0.0,
+        "anomaly_score": 6.4,
+        "final_score": 6.4
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "anomalous_data_access",
+          "db_queries_current": 53,
+          "db_queries_baseline": 0.0,
+          "suspicious_ops_current": 0,
+          "suspicious_ops_baseline": 0.0
+        },
+        "time": null,
+        "baseline": {
+          "db_queries_mean": 0.0,
+          "db_queries_std": 0.1,
+          "suspicious_ops_mean": 0.0,
+          "suspicious_ops_std": 0.1
+        },
+        "extras": {
+          "reason": "Database queries tăng đột ngột: 53 (baseline: 0.0±0.1, Z=8.00)"
+        }
+      }
+    },
+    {
+      "type": "new_user",
+      "subject": "operator",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "User mới operator xuất hiện với 7 sự kiện, chưa có trong baseline.",
+      "evidence": {
+        "events": 7
+      },
+      "prompt_ctx": {
+        "user": "operator",
+        "group": null,
+        "behavior": {
+          "type": "new_user",
+          "events": 7
+        },
+        "time": null,
+        "baseline": {},
+        "extras": {
+          "reason": "User chưa có trong baseline"
+        }
+      }
+    },
+    {
+      "type": "new_user",
+      "subject": "unknown",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "User mới unknown xuất hiện với 7 sự kiện, chưa có trong baseline.",
+      "evidence": {
+        "events": 7
+      },
+      "prompt_ctx": {
+        "user": "unknown",
+        "group": null,
+        "behavior": {
+          "type": "new_user",
+          "events": 7
+        },
+        "time": null,
+        "baseline": {},
+        "extras": {
+          "reason": "User chưa có trong baseline"
+        }
+      }
+    }
+  ]
+}

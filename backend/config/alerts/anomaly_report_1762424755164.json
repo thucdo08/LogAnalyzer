@@ -1,0 +1,136 @@
+{
+  "generated_at": "2025-11-06T10:25:55.164315+00:00",
+  "summary": {
+    "total_alerts": 3,
+    "severity_breakdown": {
+      "WARNING": 3
+    },
+    "type_breakdown": {
+      "anomalous_data_access": 3
+    },
+    "top_subjects": [
+      "ngocmai",
+      "anhthu",
+      "linhfin"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "anomalous_data_access",
+      "subject": "linhfin",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user 'linhfin': Database queries tăng đột ngột: 3 (baseline: 0.0±0.1, Z=3.00)",
+      "evidence": {
+        "user": "linhfin",
+        "db_queries": 3,
+        "db_queries_baseline": 0.0,
+        "suspicious_ops": 1,
+        "suspicious_ops_baseline": 0.0,
+        "z_queries": 3.0,
+        "z_suspicious": 1.0,
+        "anomaly_score": 2.4000000000000004,
+        "final_score": 4.0
+      },
+      "prompt_ctx": {
+        "user": "linhfin",
+        "group": null,
+        "behavior": {
+          "type": "anomalous_data_access",
+          "db_queries_current": 3,
+          "db_queries_baseline": 0.0,
+          "suspicious_ops_current": 1,
+          "suspicious_ops_baseline": 0.0
+        },
+        "time": null,
+        "baseline": {
+          "db_queries_mean": 0.0,
+          "db_queries_std": 0.1,
+          "suspicious_ops_mean": 0.0,
+          "suspicious_ops_std": 0.1
+        },
+        "extras": {
+          "reason": "Database queries tăng đột ngột: 3 (baseline: 0.0±0.1, Z=3.00)"
+        }
+      }
+    },
+    {
+      "type": "anomalous_data_access",
+      "subject": "ngocmai",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user 'ngocmai': Database queries tăng đột ngột: 3 (baseline: 0.0±0.1, Z=3.00)",
+      "evidence": {
+        "user": "ngocmai",
+        "db_queries": 3,
+        "db_queries_baseline": 0.0,
+        "suspicious_ops": 1,
+        "suspicious_ops_baseline": 0.0,
+        "z_queries": 3.0,
+        "z_suspicious": 1.0,
+        "anomaly_score": 2.4000000000000004,
+        "final_score": 4.0
+      },
+      "prompt_ctx": {
+        "user": "ngocmai",
+        "group": null,
+        "behavior": {
+          "type": "anomalous_data_access",
+          "db_queries_current": 3,
+          "db_queries_baseline": 0.0,
+          "suspicious_ops_current": 1,
+          "suspicious_ops_baseline": 0.0
+        },
+        "time": null,
+        "baseline": {
+          "db_queries_mean": 0.0,
+          "db_queries_std": 0.1,
+          "suspicious_ops_mean": 0.0,
+          "suspicious_ops_std": 0.1
+        },
+        "extras": {
+          "reason": "Database queries tăng đột ngột: 3 (baseline: 0.0±0.1, Z=3.00)"
+        }
+      }
+    },
+    {
+      "type": "anomalous_data_access",
+      "subject": "anhthu",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user 'anhthu': Database queries tăng đột ngột: 3 (baseline: 0.0±0.1, Z=3.00)",
+      "evidence": {
+        "user": "anhthu",
+        "db_queries": 3,
+        "db_queries_baseline": 0.0,
+        "suspicious_ops": 0,
+        "suspicious_ops_baseline": 0.0,
+        "z_queries": 3.0,
+        "z_suspicious": 0.0,
+        "anomaly_score": 2.4000000000000004,
+        "final_score": 4.0
+      },
+      "prompt_ctx": {
+        "user": "anhthu",
+        "group": null,
+        "behavior": {
+          "type": "anomalous_data_access",
+          "db_queries_current": 3,
+          "db_queries_baseline": 0.0,
+          "suspicious_ops_current": 0,
+          "suspicious_ops_baseline": 0.0
+        },
+        "time": null,
+        "baseline": {
+          "db_queries_mean": 0.0,
+          "db_queries_std": 0.1,
+          "suspicious_ops_mean": 0.0,
+          "suspicious_ops_std": 0.1
+        },
+        "extras": {
+          "reason": "Database queries tăng đột ngột: 3 (baseline: 0.0±0.1, Z=3.00)"
+        }
+      }
+    }
+  ]
+}

