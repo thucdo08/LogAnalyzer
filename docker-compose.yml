@@ -3,6 +3,7 @@ version: '3.8'
 services:
   backend:
     build: ./backend
+    image: loganalyze-backend:latest
     container_name: loganalyze_be
     ports:
       - "8000:8000"
@@ -10,6 +11,7 @@ services:
 
   frontend:
     build: ./frontend
+    image: loganalyze-frontend:latest
     container_name: loganalyze_fe
     ports:
       - "80:80"  # Truy cập web bằng http://localhost
