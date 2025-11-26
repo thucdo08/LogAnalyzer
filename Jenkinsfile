@@ -33,15 +33,11 @@ pipeline {
             steps {
                 script {
                     withCredentials([usernamePassword(credentialsId: REGISTRY_CRED, usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                        sh 'echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin'
                         
-                        // 1. Đăng nhập
-                        sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
-                        
-                        // 2. Tag ảnh: Từ tên gốc (local) -> Tên chuẩn Docker Hub (user/image)
                         sh "docker tag ${IMAGE_NAME_BE}:latest ${DOCKER_USER}/${IMAGE_NAME_BE}:latest"
                         sh "docker tag ${IMAGE_NAME_FE}:latest ${DOCKER_USER}/${IMAGE_NAME_FE}:latest"
 
-                        // 3. Push lên
                         sh "docker push ${DOCKER_USER}/${IMAGE_NAME_BE}:latest"
                         sh "docker push ${DOCKER_USER}/${IMAGE_NAME_FE}:latest"
                     }
