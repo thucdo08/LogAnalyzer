@@ -50,6 +50,8 @@ pipeline {
                 script {
                     echo '--- Deploying with Docker Compose ---'
                     
+                    sh "docker rm -f loganalyze_be || true"
+                    sh "docker rm -f loganalyze_fe || true"
                     // Tắt container cũ
                     sh "docker-compose down || true"
                     
