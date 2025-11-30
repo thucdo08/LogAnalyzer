@@ -182,10 +182,16 @@ def _match_noise_fields(row: pd.Series) -> str | None:
             if result_code.endswith("/200") and ("HIT" in result_code or "MISS" in result_code):
                 return "proxy_ok_cache"
 
-        # 2.1 DHCP chatter
+        # 2.1 DHCP chatter - IMPROVED: Only filter DISCOVER/OFFER without user context
+        # Keep REQUEST events (security-relevant) and all ACK/RELEASE events
         if program in ("dhcpd", "dhcp") or ("dhcp" in message.lower()):
-            if any(tok in message for tok in ("DHCPDISCOVER", "DHCPREQUEST", "DHCPOFFER")):
-                return "dhcp_chatter"
+            # Only filter pure DISCOVER/OFFER without any user information
+            if any(tok in message for tok in ("DHCPDISCOVER", "DHCPOFFER")):
+                # These are part of normal DHCP handshake - filter as noise
+                if "user=" not in message:
+                    return "dhcp_chatter"
+            # REQUEST events are security-relevant (shows intent) - never filter
+            # ACK and RELEASE events are also security-relevant - never filter
 
         # 2.3 Windows Security – sample 4624
         if "event_id" in row.index and pd.notna(row.get("event_id")):
