@@ -318,6 +318,12 @@ _WINEVENT_RE = re.compile(
     r'WinEvent:\s+(?P<message>.*)$'
 )
 
+# Windows flat key-value log (ISO timestamp + Host=... Channel=... EventID=...)
+_WINDOWS_HOST_KV_RE = re.compile(
+    r'^(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+'
+    r'Host=(?P<host>\S+)\s+(?P<body>.*)$'
+)
+
 # DNS log (named) - syslog format with DNS query info
 _DNS_QUERY_RE = re.compile(
     r'^(?P<mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+'
@@ -325,6 +331,204 @@ _DNS_QUERY_RE = re.compile(
     r'(?P<host>\S+)\s'
     r'named\[(?P<pid>\d+)\]:\s(?P<message>.*)$'
 )
+
+# DNS log (dnsmasq) - syslog format for dnsmasq DNS resolver
+_DNSMASQ_RE = re.compile(
+    r'^(?P<mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+'
+    r'(?P<day>\d{1,2})\s(?P<time>\d{2}:\d{2}:\d{2})\s'
+    r'(?P<host>\S+)\s'
+    r'dnsmasq\[(?P<pid>\d+)\]:\s(?P<message>.*)$'
+)
+
+
+def _windows_level_to_status(level: str | None) -> str:
+    level_normalized = str(level or "").strip().lower()
+    if not level_normalized:
+        return "info"
+    if level_normalized in ("information", "info", "informational"):
+        return "info"
+    if level_normalized in ("warning", "warn"):
+        return "warning"
+    if level_normalized in ("error", "critical", "fail", "failure"):
+        return "error"
+    return "info"
+
+
+def _safe_int(value):
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def _infer_windows_event_action(event_id: int | None, channel: str | None, default_status: str) -> tuple[str, str]:
+    status = default_status or "info"
+    if event_id is None:
+        return "event", status
+
+    channel_norm = (channel or "").lower()
+    security_map = {
+        4624: ("login", "success"),
+        4625: ("login", "failed"),
+        4634: ("logoff", "success"),
+        4672: ("privilege_escalation", "success"),
+        4688: ("process_create", "success"),
+    }
+    system_map = {
+        6005: ("service_start", "success"),
+        6006: ("service_stop", "success"),
+    }
+    sysmon_map = {
+        1: ("process_create", "success"),
+        3: ("network_connect", "success"),
+    }
+
+    channel_map = None
+    if channel_norm == "security":
+        channel_map = security_map
+    elif channel_norm == "system":
+        channel_map = system_map
+    elif channel_norm == "sysmon":
+        channel_map = sysmon_map
+
+    if channel_map and event_id in channel_map:
+        return channel_map[event_id]
+
+    # Fallback: try other maps in case channel is missing/mismatched
+    for mapping in (security_map, system_map, sysmon_map):
+        if event_id in mapping:
+            return mapping[event_id]
+
+    return "event", status
+
+
+def _extract_windows_host_kv_pairs(body: str) -> dict[str, str]:
+    """
+    Parse key=value pairs where values may contain spaces and escaped quotes ("").
+    """
+    pairs: dict[str, str] = {}
+    i = 0
+    length = len(body)
+
+    while i < length:
+        while i < length and body[i].isspace():
+            i += 1
+        if i >= length:
+            break
+
+        key_start = i
+        while i < length and body[i] != "=":
+            i += 1
+        if i >= length:
+            break
+        key = body[key_start:i].strip()
+        i += 1  # skip '='
+
+        if i < length and body[i] == '"':
+            i += 1
+            value_chars = []
+            while i < length:
+                ch = body[i]
+                if ch == '"':
+                    if i + 1 < length and body[i + 1] == '"':
+                        value_chars.append('"')
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                value_chars.append(ch)
+                i += 1
+            value = "".join(value_chars)
+        else:
+            value_start = i
+            while i < length and not body[i].isspace():
+                i += 1
+            value = body[value_start:i]
+
+        if key:
+            pairs[key.lower()] = value
+    return pairs
+
+
+def _parse_windows_host_kv(lines):
+    rows = []
+    for ln in lines:
+        m = _WINDOWS_HOST_KV_RE.match(ln)
+        if not m:
+            rows.append({"timestamp": pd.NaT, "message": ln})
+            continue
+
+        ts = pd.to_datetime(f"{m['date']} {m['time']}", utc=True, errors="coerce")
+        kv = _extract_windows_host_kv_pairs(m["body"])
+        host = m["host"]
+        channel = kv.get("channel")
+        provider = kv.get("provider")
+        level = kv.get("level")
+        severity = level
+        level_status = _windows_level_to_status(level)
+
+        event_id = _safe_int(kv.get("eventid") or kv.get("event_id"))
+        logon_type = _safe_int(kv.get("logontype"))
+        username = kv.get("user") or kv.get("username") or kv.get("subjectusername")
+        device = kv.get("device") or host
+        message = kv.get("message") or kv.get("description") or kv.get("info") or ln
+
+        source_ip = (
+            kv.get("srcip")
+            or kv.get("sourceip")
+            or kv.get("source_ip")
+            or kv.get("ipaddress")
+            or kv.get("src")
+        )
+        src_port = _safe_int(kv.get("srcport") or kv.get("sport"))
+        dest_ip = (
+            kv.get("destinationip")
+            or kv.get("destip")
+            or kv.get("dest")
+            or kv.get("destination")
+        )
+        dest_port = _safe_int(kv.get("destinationport") or kv.get("destport") or kv.get("dport"))
+        protocol = kv.get("protocol") or kv.get("proto")
+
+        image = kv.get("image")
+        parent_image = kv.get("parentimage") or kv.get("parent_image")
+        command_line = kv.get("commandline") or kv.get("command_line")
+
+        action, status = _infer_windows_event_action(event_id, channel, level_status)
+        if not status:
+            status = level_status
+
+        program = (channel or provider or "windows") or "windows"
+        program_normalized = str(program).lower() if program else "windows"
+
+        rows.append({
+            "timestamp": ts,
+            "host": host,
+            "program": program_normalized,
+            "channel": channel,
+            "provider": provider,
+            "level": level,
+            "severity": severity,
+            "event_id": event_id,
+            "logon_type": logon_type,
+            "username": username,
+            "device": device,
+            "source_ip": source_ip,
+            "src_port": src_port,
+            "dest_ip": dest_ip,
+            "dest_port": dest_port,
+            "protocol": protocol,
+            "process_name": image,
+            "image": image,
+            "parent_image": parent_image,
+            "command_line": command_line,
+            "action": action,
+            "status": status or level_status,
+            "message": message,
+        })
+    return pd.DataFrame(rows)
 
 # coi một dòng là "bắt đầu bản ghi mới" nếu khớp các pattern timestamp/k=v
 _START_PATTERNS = (
@@ -336,6 +540,7 @@ _START_PATTERNS = (
     _ZEEK_DNS_RE,
     _FIREWALL_RE,
     _DHCP_RE,
+    _DNSMASQ_RE,  # ← Add dnsmasq pattern
     _DNS_RE,
     _SQUID_RE,
     _SYSLOG_ISO_RE,
@@ -346,6 +551,7 @@ _START_PATTERNS = (
     _IDS_ALERT_SIMPLE_RE,
     _VPCFLOW_RE,
     _WINEVENT_RE,
+    _WINDOWS_HOST_KV_RE,
     re.compile(r"^\d{4}-\d{2}-\d{2}[ T]"),  # 2025-09-07 12:34:56
     re.compile(r"^\d{2}-[A-Za-z]{3}-\d{4}"),  # 27-Sep-2025
     re.compile(r"^\d{2}/\d{2}/\d{4}"),      # 09/27/2025
@@ -985,6 +1191,80 @@ def _parse_dhcp(lines, assume_year=None):
             "mac_address": mac_address,
             "ip_address": ip_address,
             "interface": interface,
+            "action": action,
+            "status": status,
+            "message": msg
+        })
+    return pd.DataFrame(rows)
+
+def _parse_dnsmasq(lines, assume_year=None):
+    """Parse dnsmasq DNS logs and extract DNS query/response data."""
+    rows = []
+    year = assume_year or datetime.utcnow().year
+    for ln in lines:
+        m = _DNSMASQ_RE.match(ln)
+        if not m:
+            rows.append({"timestamp": pd.NaT, "message": ln})
+            continue
+
+        ts_str = f"{year} {m['mon']} {int(m['day']):02d} {m['time']}"
+        ts = pd.to_datetime(ts_str, format="%Y %b %d %H:%M:%S", errors="coerce", utc=True)
+
+        msg = m["message"]
+        action = None
+        status = None
+        domain = None
+        query_type = None
+        source_ip = None
+        response = None
+        
+        # Extract query type and domain
+        query_match = re.search(r'query\[(\w+)\]\s+(\S+)\s+from\s+(\d+\.\d+\.\d+\.\d+)', msg)
+        if query_match:
+            query_type = query_match.group(1)
+            domain = query_match.group(2)
+            source_ip = query_match.group(3)
+            action = "query"
+            status = "info"
+        
+        # Extract reply/response
+        reply_match = re.search(r'reply\s+(\S+)\s+is\s+(.+?)(?:\s+type=|$)', msg)
+        if reply_match:
+            domain = reply_match.group(1)
+            response = reply_match.group(2)
+            action = "reply"
+            # Detect response type
+            if "NXDOMAIN" in response:
+                status = "nxdomain"
+            elif "LARGE_ANSWER" in response or "NSEC" in response:
+                status = "large_answer"
+            elif response.startswith(("10.", "172.", "192.")):  # IP address
+                status = "resolved"
+            else:
+                status = "success"
+        
+        # Extract forwarded
+        forward_match = re.search(r'forwarded\s+(\S+)\s+to\s+(\d+\.\d+\.\d+\.\d+)', msg)
+        if forward_match:
+            domain = forward_match.group(1)
+            action = "forwarded"
+            status = "forwarded"
+        
+        # Extract cached
+        cached_match = re.search(r'cached\s+(\S+)\s+is\s+(.+)', msg)
+        if cached_match:
+            domain = cached_match.group(1)
+            action = "cached"
+            status = "cached"
+
+        rows.append({
+            "timestamp": ts,
+            "host": m["host"],
+            "program": "dnsmasq",
+            "source_ip": source_ip,
+            "domain": domain,
+            "query_type": query_type,
+            "response": response,
             "action": action,
             "status": status,
             "message": msg
@@ -2171,6 +2451,7 @@ def preprocess_any(file_obj, filename=None, start_iso=None, end_iso=None):
         hit_openssh = sum(1 for ln in head if _OPENSSH_RE.match(ln))
         hit_firewall = sum(1 for ln in head if _FIREWALL_KV_RE.match(ln) or _FIREWALL_IPTABLES_RE.match(ln) or _FIREWALL_ISO_RE.match(ln))
         hit_dhcp = sum(1 for ln in head if _DHCP_RE.match(ln))
+        hit_dnsmasq = sum(1 for ln in head if _DNSMASQ_RE.match(ln))  # ← Add dnsmasq detection
         hit_dns = sum(1 for ln in head if _DNS_RE.match(ln))
         hit_linux = sum(1 for ln in head if _LINUX_RE.match(ln))
         hit_syslog = sum(1 for ln in head if _SYSLOG_RE.match(ln))
@@ -2182,6 +2463,7 @@ def preprocess_any(file_obj, filename=None, start_iso=None, end_iso=None):
         hit_ids_simple = sum(1 for ln in head if _IDS_ALERT_SIMPLE_RE.match(ln))
         hit_vpcflow = sum(1 for ln in head if _VPCFLOW_RE.match(ln))
         hit_winevent = sum(1 for ln in head if _WINEVENT_RE.match(ln))
+        hit_windows_host_kv = sum(1 for ln in head if _WINDOWS_HOST_KV_RE.match(ln) and "EventID=" in ln)
         hit_dns_query = sum(1 for ln in head if _DNS_QUERY_RE.match(ln))
         hit_edr_sysmon = sum(1 for ln in head if _EDR_SYSMON_RE.match(ln))
         hit_router_ios = sum(1 for ln in head if _ROUTER_IOS_RE.match(ln))
@@ -2219,6 +2501,8 @@ def preprocess_any(file_obj, filename=None, start_iso=None, end_iso=None):
             df_raw = _parse_router_ios_log(lines)
         elif hit_edrnet >= max(3, len(head)//4):
             df_raw = _parse_edr_network(lines)
+        elif hit_windows_host_kv >= max(3, len(head)//4):
+            df_raw = _parse_windows_host_kv(lines)
         elif hit_winevent >= max(3, len(head)//4):
             df_raw = _parse_winevent_log(lines)
         elif hit_openssh >= max(3, len(head)//4):
@@ -2227,6 +2511,8 @@ def preprocess_any(file_obj, filename=None, start_iso=None, end_iso=None):
             df_raw = _parse_firewall(lines)
         elif hit_dhcp >= max(3, len(head)//4):
             df_raw = _parse_dhcp(lines)
+        elif hit_dnsmasq >= max(3, len(head)//4):  # ← Add dnsmasq parser
+            df_raw = _parse_dnsmasq(lines)
         elif hit_dns_query >= max(3, len(head)//4):
             df_raw = _parse_dns_query_log(lines)
         elif hit_dns >= max(3, len(head)//4):
