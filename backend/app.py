@@ -24,9 +24,12 @@ from openai import OpenAI
 from services.validator import basic_validate_df
 from services.filters import reduce_noise
 from services.enrich import enrich_df
+#from services.alert_sender import get_alert_sender_service
 
 import tempfile, shutil
 from datetime import datetime, timezone
+import requests
+
 
 import os, json
 import pandas as pd
@@ -148,53 +151,46 @@ def _rebuild_text_events(df: pd.DataFrame):
     return logs_text, events_pm
 
 
-def _get_logs_for_alert(df: pd.DataFrame, alert: dict, lookback_minutes: int = 30) -> pd.DataFrame:
+def _get_logs_for_alert(df: pd.DataFrame, alert: dict, lookback_minutes: int = 30, max_logs: int = 100) -> pd.DataFrame:
     """
     Lấy logs liên quan đến 1 alert để phân tích AI.
     Strategy:
-    - Nếu alert có 'subject' là username/ip -> lọc logs của user/ip đó
-    - Nếu là timestamp alert -> lấy logs xung quanh thời gian đó
-    - Limit: tối đa 500 dòng để tránh token overhead
+    - Nếu alert có 'subject' là username -> lọc logs của user đó
+    - Nếu là IP-related -> lọc logs của IP đó
+    - Limit: tối đa max_logs dòng để tránh token overhead (default 100, khớp với số lượng logs liên quan)
     """
     if df is None or df.empty:
         return pd.DataFrame()
     
     df_work = df.copy()
-    alert_type = alert.get("type", "")
     subject = alert.get("subject", "")
     
-    # Nếu là user-related alert
-    if "user" in alert_type and subject:
-        user_logs = df_work[df_work.get("username", pd.Series()).astype(str) == str(subject)]
-        if not user_logs.empty:
-            return user_logs.tail(500)
+    if not subject:
+        return df_work.tail(max_logs)
     
-    # Nếu là IP-related alert
-    if "ip" in alert_type or "port" in alert_type:
+    # Strategy 1: Lọc logs của user/username này (nếu subject là username)
+    if "username" in df_work.columns:
+        user_logs = df_work[df_work["username"].astype(str).str.lower() == str(subject).lower()]
+        if not user_logs.empty:
+            return user_logs.tail(max_logs)
+    
+    # Strategy 2: Lọc logs của source_ip/destination_ip này
+    if "source_ip" in df_work.columns or "destination_ip" in df_work.columns:
         ip_logs = df_work[
             (df_work.get("source_ip", pd.Series()).astype(str) == str(subject)) |
-            (df_work.get("dest_ip", pd.Series()).astype(str) == str(subject))
+            (df_work.get("destination_ip", pd.Series()).astype(str) == str(subject))
         ]
         if not ip_logs.empty:
-            return ip_logs.tail(500)
+            return ip_logs.tail(max_logs)
     
-    # Nếu alert có timestamp
-    try:
-        if "timestamp" in df_work.columns and subject:
-            ts = pd.to_datetime(subject, errors="coerce", utc=True)
-            if pd.notna(ts):
-                start = ts - pd.Timedelta(minutes=lookback_minutes)
-                end = ts + pd.Timedelta(minutes=lookback_minutes)
-                time_logs = df_work[
-                    (df_work["timestamp"] >= start) & (df_work["timestamp"] <= end)
-                ]
-                if not time_logs.empty:
-                    return time_logs.tail(500)
-    except Exception:
-        pass
+    # Strategy 3: Lọc logs của host/device này
+    if "host" in df_work.columns:
+        host_logs = df_work[df_work["host"].astype(str).str.lower() == str(subject).lower()]
+        if not host_logs.empty:
+            return host_logs.tail(max_logs)
     
     # Fallback: trả về logs gần nhất
-    return df_work.tail(100)
+    return df_work.tail(max_logs)
 
 @app.post("/anomaly/raw")
 def anomaly_raw():
@@ -252,6 +248,7 @@ def anomaly_raw():
                 if log_type != "generic":
                     break
         
+        # Load baselines from common baselines folder (all log types share same files)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
         print(f"Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
         alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
@@ -511,6 +508,7 @@ def analyze():
                 if log_type != "generic":
                     break
         
+        # Load baselines from common baselines folder (all log types share same files)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
         print(f"  → Log type: {log_type}, baselines_dir={base_dir}")
         all_alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
@@ -597,11 +595,11 @@ def analyze():
                 print(f"\n  [{subject_idx}/{len(alerts_by_subject)}] Phân tích user/IP: '{subject}' ({len(alerts_group)} alerts)")
                 
                 # === BƯỚC 3a: Lấy logs liên quan (tất cả logs của user/IP này) ===
-                # Use the first alert as template to get logs
+                # Use the first alert as template to get logs (up to 100 logs per group)
                 first_alert = alerts_group[0]
-                related_logs_df = _get_logs_for_alert(df_used, first_alert, lookback_minutes=30)
+                related_logs_df = _get_logs_for_alert(df_used, first_alert, lookback_minutes=30, max_logs=100)
                 logs_text, _ = _rebuild_text_events(related_logs_df)
-                print(f"       → Lấy {len(logs_text)} logs liên quan")
+                print(f"       → Lấy {len(logs_text)} logs liên quan (max 100 per group)")
                 
                 # === BƯỚC 3b: Tạo prompt chi tiết từ TẤT CẢ cảnh báo của user này + logs ===
                 # Build a combined prompt with all alert types for this subject
@@ -697,9 +695,27 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                     },
                 })
 
+        # === FLATTEN step3_results for frontend ===
+        # Backend groups alerts by subject for AI analysis efficiency,
+        # but frontend expects individual alert objects with score/severity
+        flattened_results = []
+        for grouped_item in step3_results:
+            ai_analysis = grouped_item.get("ai_analysis", {})
+            # Enrich each individual alert with group's AI analysis
+            for alert in grouped_item.get("alerts", []):
+                flattened_results.append({
+                    "type": alert.get("type"),
+                    "subject": alert.get("subject"),
+                    "severity": alert.get("severity"),  # ← Alert's own severity
+                    "score": alert.get("score"),        # ← Alert's own score
+                    "text": alert.get("text"),
+                    "evidence": alert.get("evidence"),
+                    "ai_analysis": ai_analysis,  # Share group's AI analysis
+                })
+        
         # Summary bước 4
         step4_summary = {
-            "total_analyzed": len(step3_results),
+            "total_analyzed": len(flattened_results),
             "by_risk_level": dict(Counter(r.get("ai_analysis", {}).get("risk_level") for r in step3_results)),
         }
 
@@ -709,11 +725,60 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
         print(f"  Bước 4 (AI Analysis): {step4_summary['total_analyzed']} alerts đã phân tích")
         print(f"{'='*60}\n")
 
+        # === BƯỚC 5: Gửi kết quả (grouped by subject) tới N8N Webhook ===
+        # Format: [{ subject, alert_types, alert_count, risk_level, severity, score, summary, events, risk_analysis, recommendation }, ...]
+        n8n_payload = []
+        for grouped_item in step3_results:
+            ai_analysis = grouped_item.get("ai_analysis", {})
+            
+            # Lấy top 2 events từ alerts
+            sample_alerts = grouped_item.get("alerts", [])[:2]
+            events = [
+                f"[{a.get('type')}] {a.get('text', '')[:100]}"
+                for a in sample_alerts
+            ]
+            if len(grouped_item.get("alerts", [])) > 2:
+                events.append(f"+{len(grouped_item.get('alerts', [])) - 2} more alerts...")
+            
+            n8n_item = {
+                "subject": grouped_item.get("subject"),
+                "alert_types": ", ".join(grouped_item.get("alert_types", [])),
+                "alert_count": grouped_item.get("alert_count", 0),
+                "risk_level": ai_analysis.get("risk_level", "Trung bình"),
+                "severity": grouped_item.get("severity_max", "INFO"),
+                "score": grouped_item.get("score_max", 0),
+                "events": events,
+                "summary": ai_analysis.get("summary", "Không có tóm tắt"),
+                "risk_analysis": " | ".join(ai_analysis.get("risks", [])),
+                "recommendation": " | ".join(ai_analysis.get("actions", [])),
+            }
+            n8n_payload.append(n8n_item)
+        
+        # Gửi tới N8N webhook (nếu cấu hình)
+        n8n_webhook_url = os.getenv("N8N_WEBHOOK_URL")
+        if n8n_webhook_url:
+            try:
+                print(f"[N8N] Gửi {len(n8n_payload)} kết quả phân tích tới N8N webhook...")
+                response = requests.post(
+                    n8n_webhook_url,
+                    json={"results": n8n_payload},
+                    timeout=30,
+                    headers={"Content-Type": "application/json"}
+                )
+                if response.status_code == 200:
+                    print(f"[N8N] ✅ Webhook executed successfully")
+                else:
+                    print(f"[N8N] ⚠️ Webhook returned {response.status_code}: {response.text[:100]}")
+            except Exception as ex:
+                print(f"[N8N] ❌ Error sending to webhook: {ex}")
+        else:
+            print(f"[N8N] ⚠️ N8N_WEBHOOK_URL not configured, skipping webhook")
+
         # === Response ===
         payload = {
             "ok": True,
             "step2_summary": step2_summary,
-            "step3_results": step3_results,
+            "step3_results": flattened_results,  # ← Use flattened results with score/severity!
             "saved_report_path": saved_report_path,
             "step4_summary": step4_summary,
         }
@@ -1042,7 +1107,7 @@ def baseline_train():
 
         # === LƯU GỘP (append/merge) - all in one common baselines folder ===
         base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
-        out_dir = base_root  # All baselines go to config/baselines/ (no log_type subfolder)
+        out_dir = base_root  # All baselines go to config/baselines/ (single shared folder)
         os.makedirs(out_dir, exist_ok=True)
 
         # 1) USER STATS (merge theo 'username')
@@ -1154,6 +1219,169 @@ def baseline_groups():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+
+# ==================== Alert Endpoints ====================
+
+@app.route('/send-analysis-alerts', methods=['POST'])
+def send_analysis_alerts():
+    """
+    Gửi alerts từ analysis results tới N8N, Telegram, Zalo
+    
+    Request JSON:
+    {
+        "results": [
+            {
+                "subject": "user/ip",
+                "alert_type": "privilege_escalation_detected",
+                "risk_level": "Cực kỳ nguy cấp",
+                "score": 9.0,
+                "summary": "...",
+                "risk": "...",
+                "action": "...",
+                "alert_count": 4
+            }
+        ]
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'results' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing required field: results'
+            }), 400
+        
+        alert_service = get_alert_sender_service()
+        results = alert_service.send_analysis_alerts(data['results'])
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Alerts sent to N8N, Telegram, Zalo',
+            'details': results
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in send_analysis_alerts: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/send-raw-anomalies', methods=['POST'])
+def send_raw_anomalies():
+    """
+    Gửi raw anomaly alerts tới N8N, Telegram, Zalo
+    
+    Request JSON:
+    {
+        "anomalies": [
+            {
+                "severity": "CRITICAL",
+                "alert_type": "privilege_escalation_detected",
+                "subject": "user/ip",
+                "details": {...}
+            }
+        ]
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'anomalies' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing required field: anomalies'
+            }), 400
+        
+        alert_service = get_alert_sender_service()
+        results = alert_service.send_raw_anomaly_alerts(data['anomalies'])
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Raw anomalies sent to all channels',
+            'details': results
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in send_raw_anomalies: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/send-telegram', methods=['POST'])
+def send_telegram():
+    """
+    Gửi message tới Telegram
+    
+    Request JSON:
+    {
+        "message": "Nội dung tin nhắn",
+        "severity": "CRITICAL|WARNING|INFO"
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'message' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing required field: message'
+            }), 400
+        
+        alert_service = get_alert_sender_service()
+        result = alert_service.send_to_telegram(
+            data['message'],
+            data.get('severity', 'INFO')
+        )
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        print(f"Error in send_telegram: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/send-zalo', methods=['POST'])
+def send_zalo():
+    """
+    Gửi message tới Zalo
+    
+    Request JSON:
+    {
+        "message": "Nội dung tin nhắn",
+        "severity": "CRITICAL|WARNING|INFO"
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data or 'message' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing required field: message'
+            }), 400
+        
+        alert_service = get_alert_sender_service()
+        result = alert_service.send_to_zalo(
+            data['message'],
+            data.get('severity', 'INFO')
+        )
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        print(f"Error in send_zalo: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 
 if __name__ == "__main__":
