@@ -1,9 +1,9 @@
 {
-  "generated_at": "2025-11-08T07:50:41.742144+00:00",
+  "generated_at": "2025-12-02T10:56:08.924060+00:00",
   "summary": {
     "total_alerts": 1,
     "severity_breakdown": {
-      "HIGH": 1
+      "CRITICAL": 1
     },
     "type_breakdown": {
       "anomalous_data_access": 1
@@ -16,7 +16,7 @@
     {
       "type": "anomalous_data_access",
       "subject": "linhfin",
-      "severity": "HIGH",
+      "severity": "CRITICAL",
       "score": 6.4,
       "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user 'linhfin': Database queries tăng đột ngột: 9 (baseline: 0.0±0.1, Z=8.00)",
       "evidence": {
