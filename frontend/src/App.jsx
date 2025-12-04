@@ -148,7 +148,7 @@ export default function App() {
       const fd = new FormData();
       fd.append("file", file);
       if (fromTs) fd.append("from", new Date(fromTs).toISOString());
-      if (toTs)   fd.append("to",   new Date(toTs).toISOString());
+      if (toTs) fd.append("to", new Date(toTs).toISOString());
 
       const res = await fetch(`${API_BASE}/analyze`, { method: "POST", body: fd });
       const data = await res.json();
@@ -214,7 +214,7 @@ export default function App() {
       const fd = new FormData();
       fd.append("file", lastFile);
       if (fromTs) fd.append("from", new Date(fromTs).toISOString());
-      if (toTs)   fd.append("to", new Date(toTs).toISOString());
+      if (toTs) fd.append("to", new Date(toTs).toISOString());
 
       const res = await fetch(`${API_BASE}/export`, { method: "POST", body: fd });
       if (!res.ok) throw new Error("Export server thất bại");
@@ -238,8 +238,8 @@ export default function App() {
       level === "CRITICAL"
         ? "bg-red-100 text-red-800"
         : level === "WARNING"
-        ? "bg-orange-100 text-orange-800"
-        : "bg-sky-100 text-sky-800";
+          ? "bg-orange-100 text-orange-800"
+          : "bg-sky-100 text-sky-800";
     return (
       <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${cls}`}>
         {children}
@@ -253,12 +253,12 @@ export default function App() {
       viewMode === "upgraded"
         ? resultsUp
         : (resultsRaw || []).map((r, idx) => ({
-            log_index: r.log_index ?? idx + 1,
-            level: r.level,
-            summary: r.summary,
-            suggestion: r.suggestion,
-            // raw chưa có count/reason
-          }));
+          log_index: r.log_index ?? idx + 1,
+          level: r.level,
+          summary: r.summary,
+          suggestion: r.suggestion,
+          // raw chưa có count/reason
+        }));
 
     const q = (query || "").toLowerCase().trim();
     return base.filter(
@@ -296,8 +296,8 @@ export default function App() {
     providerOpenAI == null
       ? null
       : providerOpenAI
-      ? <span className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-semibold">Provider: OpenAI</span>
-      : <span className="px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold">Provider: Heuristic</span>;
+        ? <span className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-semibold">Provider: OpenAI</span>
+        : <span className="px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold">Provider: Heuristic</span>;
 
   const showingChip = (
     <span className="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-xs font-semibold">
@@ -310,8 +310,8 @@ export default function App() {
   const timeRangeChip =
     validateReport?.info?.time_range
       ? <span className="px-2 py-1 rounded-lg bg-sky-50 text-sky-700 text-xs font-semibold">
-          Time: {validateReport.info.time_range[0]} → {validateReport.info.time_range[1]}
-        </span>
+        Time: {validateReport.info.time_range[0]} → {validateReport.info.time_range[1]}
+      </span>
       : null;
 
   // mapping lớp màu cố định cho risk level (tránh Tailwind purge)
@@ -496,7 +496,7 @@ export default function App() {
                       {anomalyReport.total_alerts} alerts
                     </span>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
                     <div className="bg-white p-3 rounded border-l-4 border-red-500">
                       <div className="text-xs text-slate-600">CRITICAL</div>
                       <div className="text-2xl font-bold text-red-600">{anomalyReport.severity_breakdown?.CRITICAL || 0}</div>
@@ -505,14 +505,6 @@ export default function App() {
                       <div className="text-xs text-slate-600">WARNING</div>
                       <div className="text-2xl font-bold text-orange-600">{anomalyReport.severity_breakdown?.WARNING || 0}</div>
                     </div>
-                    <div className="bg-white p-3 rounded border-l-4 border-yellow-500">
-                      <div className="text-xs text-slate-600">INFO</div>
-                      <div className="text-2xl font-bold text-yellow-600">{anomalyReport.severity_breakdown?.INFO || 0}</div>
-                    </div>
-                  </div>
-                  <div className="mt-3 text-sm text-slate-700">
-                    <strong>Alert Types:</strong>{" "}
-                    {Object.entries(anomalyReport.type_breakdown || {}).map(([k, v]) => `${k}: ${v}`).join(", ")}
                   </div>
                 </div>
               )}
@@ -555,9 +547,9 @@ export default function App() {
                       return subjects.map((subject, idx) => {
                         const severityClass =
                           subject.severity === "CRITICAL" ? "text-red-600" :
-                          subject.severity === "WARNING" ? "text-orange-600" :
-                          subject.severity === "INFO" ? "text-yellow-600" :
-                          "text-slate-600";
+                            subject.severity === "WARNING" ? "text-orange-600" :
+                              subject.severity === "INFO" ? "text-yellow-600" :
+                                "text-slate-600";
 
                         const alertTypesLabel = subject.alertTypes.length
                           ? subject.alertTypes.join(", ")

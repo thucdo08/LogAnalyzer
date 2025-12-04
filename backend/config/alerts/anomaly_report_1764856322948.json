@@ -1,5 +1,5 @@
 {
-  "generated_at": "2025-11-08T08:31:52.612331+00:00",
+  "generated_at": "2025-12-04T13:52:02.948001+00:00",
   "summary": {
     "total_alerts": 75,
     "severity_breakdown": {
@@ -9,16 +9,16 @@
       "data_exfiltration_detected": 75
     },
     "top_subjects": [
-      "linhfin",
-      "(unknown)",
+      "khanhng",
       "ngocmai",
-      "minhtq",
-      "anhthu",
-      "tnghia",
+      "linhfin",
+      "trinhk",
+      "thuongf",
+      "(unknown)",
+      "huyle",
       "huydev",
       "quangdev",
-      "khanhng",
-      "trinhk"
+      "minhtq"
     ]
   },
   "alerts": [

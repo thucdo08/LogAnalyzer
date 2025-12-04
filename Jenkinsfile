@@ -48,6 +48,19 @@ pipeline {
         stage('Deploy (Localhost)') {
             steps {
                 script {
+                    echo '--- Generating .env file ---'
+                    withCredentials([
+                        string(credentialsId: 'openai-api-key', variable: 'ENV_OPENAI_KEY'),
+                        string(credentialsId: 'n8n-webhook-url', variable: 'ENV_N8N_URL')
+                    ]) {
+                        sh """
+                            echo "FLASK_ENV=production" > ./backend/.env
+                            echo "OPENAI_API_KEY=${ENV_OPENAI_KEY}" >> ./backend/.env
+                            echo "N8N_WEBHOOK_URL=${ENV_N8N_URL}" >> ./backend/.env
+                            echo "SAVE_OUTPUTS=false" >> ./backend/.env
+                            echo "OUTPUT_DIR=./outputs" >> ./backend/.env
+                        """
+                    }
                     echo '--- Deploying with Docker Compose ---'
                     
                     sh "docker rm -f loganalyze_be || true"

@@ -1,0 +1,93 @@
+{
+  "generated_at": "2025-12-04T13:16:08.744829+00:00",
+  "summary": {
+    "total_alerts": 2,
+    "severity_breakdown": {
+      "CRITICAL": 2
+    },
+    "type_breakdown": {
+      "anomalous_data_access": 1,
+      "dhcp_scope_conflict": 1
+    },
+    "top_subjects": [
+      "backup",
+      "sales1"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "anomalous_data_access",
+      "subject": "backup",
+      "severity": "CRITICAL",
+      "score": 6.4,
+      "text": "Phát hiện hoạt động truy cập dữ liệu bất thường từ user 'backup': Database queries tăng đột ngột: 30 (baseline: 0.0±0.1, Z=8.00)",
+      "evidence": {
+        "user": "backup",
+        "db_queries": 30,
+        "db_queries_baseline": 0.0,
+        "suspicious_ops": 0,
+        "suspicious_ops_baseline": 0.0,
+        "z_queries": 30.0,
+        "z_suspicious": 0.0,
+        "anomaly_score": 6.4,
+        "final_score": 6.4
+      },
+      "prompt_ctx": {
+        "user": "backup",
+        "group": null,
+        "behavior": {
+          "type": "anomalous_data_access",
+          "db_queries_current": 30,
+          "db_queries_baseline": 0.0,
+          "suspicious_ops_current": 0,
+          "suspicious_ops_baseline": 0.0
+        },
+        "time": null,
+        "baseline": {
+          "db_queries_mean": 0.0,
+          "db_queries_std": 0.1,
+          "suspicious_ops_mean": 0.0,
+          "suspicious_ops_std": 0.1
+        },
+        "extras": {
+          "reason": "Database queries tăng đột ngột: 30 (baseline: 0.0±0.1, Z=8.00)"
+        }
+      }
+    },
+    {
+      "type": "dhcp_scope_conflict",
+      "subject": "sales1",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "Thiết bị MAC bc:b4:68:42:25:ac nhận IP từ 2 DHCP servers khác nhau (dhcp-eng02, dhcp-sales01) trong 3 subnets (10.71.92, 10.73.193, 10.73.228). Điều này có thể chỉ ra xung đột phạm vi DHCP hoặc máy chủ rogue.",
+      "evidence": {
+        "mac_address": "bc:b4:68:42:25:ac",
+        "servers": [
+          "dhcp-eng02",
+          "dhcp-sales01"
+        ],
+        "subnets": [
+          "10.71.92",
+          "10.73.193",
+          "10.73.228"
+        ],
+        "server_count": 2,
+        "subnet_count": 3
+      },
+      "prompt_ctx": {
+        "user": "sales1",
+        "group": null,
+        "behavior": {
+          "type": "dhcp_scope_conflict",
+          "servers": 2,
+          "subnets": 3
+        },
+        "time": null,
+        "baseline": {},
+        "extras": {
+          "reason": "MAC appears in multiple DHCP server responses"
+        }
+      }
+    }
+  ]
+}
