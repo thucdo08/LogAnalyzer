@@ -495,50 +495,157 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return alerts
 
 def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect firewall-based attacks (deny burst, exfiltration, port scan, policy evasion, rogue)."""
+    """Detect firewall-based attacks (deny burst, exfiltration, port scan, policy evasion, rogue).
+    
+    Enhanced to detect:
+    - Traditional firewall logs (program == "firewall")
+    - UFW logs (program == "kernel" with "[UFW BLOCK]" or "[UFW ALLOW]" in message)
+    """
     alerts = []
     
-    if "program" not in df.columns or not df["program"].eq("firewall").any():
+    # DEBUG: Check input dataframe
+    import sys
+    print(f"\n[DEBUG] _detect_firewall_anomalies called with {len(df)} rows", file=sys.stderr)
+    print(f"[DEBUG] Columns: {df.columns.tolist()}", file=sys.stderr)
+    
+    # Check for both traditional firewall logs AND UFW logs
+    has_firewall = "program" in df.columns and df["program"].eq("firewall").any()
+    has_ufw = "message" in df.columns and df["message"].astype(str).str.contains(r"\[UFW (BLOCK|ALLOW)\]", case=False, na=False).any()
+    
+    print(f"[DEBUG] has_firewall={has_firewall}, has_ufw={has_ufw}", file=sys.stderr)
+    
+    # DEBUG: Check sample messages
+    if "message" in df.columns:
+        sample_messages = df["message"].head(5).tolist()
+        print(f"[DEBUG] Sample messages:", file=sys.stderr)
+        for i, msg in enumerate(sample_messages):
+            print(f"  [{i}] {str(msg)[:150]}", file=sys.stderr)
+    
+    # DEBUG: Check if program column exists and its values
+    if "program" in df.columns:
+        programs = df["program"].unique().tolist()[:10]
+        print(f"[DEBUG] Program values: {programs}", file=sys.stderr)
+    
+    if not has_firewall and not has_ufw:
+        print(f"[DEBUG] No firewall or UFW logs found, returning empty alerts", file=sys.stderr)
         return alerts
+
     
     try:
-        fw_df = df[df["program"] == "firewall"].copy()
+        # Collect firewall-related logs
+        fw_df = pd.DataFrame()
+        
+        # 1. Traditional firewall logs
+        if has_firewall:
+            fw_df = df[df["program"] == "firewall"].copy()
+        
+        # 2. UFW logs (kernel program with UFW patterns)
+        if has_ufw:
+            print(f"[DEBUG] Processing UFW logs...", file=sys.stderr)
+            ufw_df = df[df["message"].astype(str).str.contains(r"\[UFW (BLOCK|ALLOW)\]", case=False, na=False)].copy()
+            
+            print(f"[DEBUG] Found {len(ufw_df)} UFW log entries", file=sys.stderr)
+            
+            # Parse UFW log fields from message
+            # Example: [UFW BLOCK] IN=eth0 OUT= MAC=... SRC=113.161.72.15 DST=10.10.10.5 LEN=40 ... PROTO=TCP SPT=45678 DPT=21 ...
+            if not ufw_df.empty:
+                # Extract fields using regex
+                ufw_df["ufw_action"] = ufw_df["message"].str.extract(r"\[UFW (BLOCK|ALLOW)\]", flags=re.IGNORECASE)[0].str.lower()
+                ufw_df["source_ip"] = ufw_df["message"].str.extract(r"SRC=([0-9\.]+)")[0]
+                ufw_df["dest_ip"] = ufw_df["message"].str.extract(r"DST=([0-9\.]+)")[0]
+                ufw_df["dest_port"] = ufw_df["message"].str.extract(r"DPT=(\d+)")[0]
+                ufw_df["protocol"] = ufw_df["message"].str.extract(r"PROTO=(\w+)")[0]
+                
+                # DEBUG: Show parsed fields
+                print(f"[DEBUG] Parsed UFW fields:", file=sys.stderr)
+                print(f"  - Actions: {ufw_df['ufw_action'].unique().tolist()}", file=sys.stderr)
+                print(f"  - Source IPs: {ufw_df['source_ip'].unique().tolist()}", file=sys.stderr)
+                print(f"  - Dest ports: {ufw_df['dest_port'].unique().tolist()}", file=sys.stderr)
+                
+                # Map UFW action to standard action column
+                if "action" not in ufw_df.columns:
+                    ufw_df["action"] = ufw_df["ufw_action"]
+                
+                # Merge with existing firewall logs if present
+                if not fw_df.empty:
+                    # Combine both datasets
+                    fw_df = pd.concat([fw_df, ufw_df], ignore_index=True)
+                else:
+                    fw_df = ufw_df
+        
         if fw_df.empty:
             return alerts
         
-        # 1. Detect DENY bursts (brute force, scan attempts)
-        if "action" in fw_df.columns:
-            deny_count = ((fw_df["action"] == "deny") | (fw_df["action"] == "DENY")).sum()
-            if deny_count > 30:
-                unique_users = fw_df[((fw_df["action"] == "deny") | (fw_df["action"] == "DENY"))]["username"].nunique()
-                alert_text = f"Firewall DENY burst detected: {int(deny_count)} denied connections from {int(unique_users)} users"
+        # === UFW-SPECIFIC DETECTION: Port Scanning ===
+        # Detect when same source IP scans multiple destination ports
+        if "dest_port" in fw_df.columns and "source_ip" in fw_df.columns:
+            fw_df["dest_port_num"] = pd.to_numeric(fw_df["dest_port"], errors="coerce")
+            
+            # Group by source IP and count unique ports scanned
+            src_ports = fw_df[fw_df["dest_port_num"].notna()].groupby("source_ip")["dest_port_num"].agg(["nunique", "count", lambda x: sorted(x.unique().tolist())])
+            src_ports.columns = ["unique_ports", "total_attempts", "ports_list"]
+            
+            # Port scan threshold: 5+ unique ports from same IP = suspicious
+            scan_sources = src_ports[src_ports["unique_ports"] >= 5]
+            
+            if len(scan_sources) > 0:
+                for src_ip, row in scan_sources.iterrows():
+                    unique_ports = int(row["unique_ports"])
+                    total_attempts = int(row["total_attempts"])
+                    ports_list = row["ports_list"][:10]  # First 10 ports
+                    
+                    alert_text = f"Port scanning detected from {src_ip}: scanned {unique_ports} unique ports in {total_attempts} attempts. Ports: {ports_list}"
+                    alerts.append({
+                        "type": "firewall_portscan",
+                        "subject": str(src_ip),
+                        "severity": "CRITICAL" if unique_ports >= 10 else "WARNING",
+                        "score": min(7.0 + (unique_ports / 10), 10.0),
+                        "text": alert_text,
+                        "evidence": {
+                            "source_ip": str(src_ip),
+                            "unique_ports": unique_ports,
+                            "total_attempts": total_attempts,
+                            "ports_scanned": [int(p) for p in ports_list if pd.notna(p)]
+                        },
+                        "prompt_ctx": {"behavior": {"type": "firewall_portscan", "source_ip": str(src_ip), "ports": unique_ports}},
+                    })
+        
+        # === UFW-SPECIFIC DETECTION: Deny/Block Bursts ===
+        # Detect high volume of blocked connections
+        if "action" in fw_df.columns or "ufw_action" in fw_df.columns:
+            action_col = "ufw_action" if "ufw_action" in fw_df.columns else "action"
+            
+            # Count BLOCK/DENY events
+            deny_mask = fw_df[action_col].astype(str).str.lower().isin(["block", "deny"])
+            deny_count = deny_mask.sum()
+            
+            if deny_count >= 5:  # Lowered threshold for UFW (was 30 for traditional firewall)
+                denied_df = fw_df[deny_mask]
+                unique_sources = denied_df["source_ip"].nunique() if "source_ip" in denied_df.columns else 0
+                unique_dests = denied_df["dest_ip"].nunique() if "dest_ip" in denied_df.columns else 0
+                
+                # Get top source IPs
+                top_sources = []
+                if "source_ip" in denied_df.columns:
+                    top_sources = denied_df["source_ip"].value_counts().head(3).index.tolist()
+                
+                alert_text = f"Firewall DENY/BLOCK burst detected: {int(deny_count)} blocked connections from {int(unique_sources)} source IPs to {int(unique_dests)} destinations. Top sources: {top_sources}"
                 alerts.append({
                     "type": "firewall_deny_burst",
                     "subject": "Firewall Security",
-                    "severity": "CRITICAL",
-                    "score": 8.5,
+                    "severity": "CRITICAL" if deny_count >= 20 else "WARNING",
+                    "score": min(6.0 + (deny_count / 10), 10.0),
                     "text": alert_text,
-                    "evidence": {"deny_count": int(deny_count), "unique_users": int(unique_users)},
-                    "prompt_ctx": {"behavior": {"type": "firewall_deny_burst"}},
+                    "evidence": {
+                        "deny_count": int(deny_count),
+                        "unique_sources": int(unique_sources),
+                        "unique_destinations": int(unique_dests),
+                        "top_source_ips": [str(ip) for ip in top_sources]
+                    },
+                    "prompt_ctx": {"behavior": {"type": "firewall_deny_burst", "count": int(deny_count)}},
                 })
         
-        # 2. Detect Port Scanning (many unique dest_ports from same source)
-        if "dest_port" in fw_df.columns and "source_ip" in fw_df.columns:
-            fw_df["dest_port_num"] = pd.to_numeric(fw_df["dest_port"], errors="coerce")
-            src_ports = fw_df.groupby("source_ip")["dest_port_num"].nunique()
-            scan_sources = src_ports[src_ports > 10]
-            if len(scan_sources) > 0:
-                max_ports = scan_sources.max()
-                alert_text = f"Port scanning detected: {len(scan_sources)} sources scanning {int(max_ports)} ports"
-                alerts.append({
-                    "type": "firewall_portscan",
-                    "subject": "Firewall Security",
-                    "severity": "WARNING",
-                    "score": 7.0,
-                    "text": alert_text,
-                    "evidence": {"scan_sources": int(len(scan_sources)), "max_ports": int(max_ports)},
-                    "prompt_ctx": {"behavior": {"type": "firewall_portscan"}},
-                })
+        # === TRADITIONAL FIREWALL DETECTIONS (kept for backward compatibility) ===
         
         # 3. Detect Exfiltration (high bytes to external destinations)
         if "bytes_sent" in fw_df.columns and "dest_ip" in fw_df.columns:
@@ -597,10 +704,13 @@ def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                         "prompt_ctx": {"behavior": {"type": "firewall_rogue_internal"}},
                     })
     
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Firewall anomaly detection error: {e}", file=sys.stderr)
         pass
     
     return alerts
+
 
 def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """Detect DNS-based attacks (amplification, DGA, NXDOMAIN storm, tunneling)."""
@@ -1782,10 +1892,11 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
         dns_alerts = _detect_dns_anomalies(df)
         alerts.extend(dns_alerts)
     
-    # NEW: Firewall-specific attack detection (when firewall logs detected)
-    if "program" in df.columns and df["program"].eq("firewall").any():
-        fw_alerts = _detect_firewall_anomalies(df)
-        alerts.extend(fw_alerts)
+    
+    # NEW: Firewall-specific attack detection (firewall OR UFW logs)
+    # The detector now checks internally for both program=='firewall' and UFW patterns
+    fw_alerts = _detect_firewall_anomalies(df)
+    alerts.extend(fw_alerts)
     
     # NEW: Apache/Web-specific attack detection (when apache logs detected)
     # Detector checks for Apache-specific columns (http_status, path, vhost) internally
