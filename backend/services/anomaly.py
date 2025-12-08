@@ -419,104 +419,8 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
         # Convert status to numeric for all detections
         apache_df["status_code"] = pd.to_numeric(apache_df[status_col], errors="coerce")
         
-        # 1. Detect Brute Force + Account Takeover
-        if "status_code" in apache_df.columns and "source_ip" in apache_df.columns:
-            # Find 401 failures (authentication failures)
-            auth_failures = apache_df[apache_df["status_code"] == 401]
-            
-            import sys
-            print(f"[DEBUG] Found {len(auth_failures)} total 401 auth failures", file=sys.stderr)
-            
-            # Detect brute force: either concentrated (few IPs, many attempts) or distributed (many IPs, few attempts each)
-            # For distributed attacks, each IP may only have 1-2 failures, so we don't filter by IP count
-            if len(auth_failures) > 5:
-                # Get all unique IPs involved
-                ip_failure_counts = auth_failures["source_ip"].value_counts()
-                all_ips = ip_failure_counts.index.tolist()
-                
-                # Determine if it's concentrated or distributed attack
-                max_failures_per_ip = ip_failure_counts.max()
-                attack_type = "concentrated" if max_failures_per_ip >= 5 else "distributed"
-                
-                print(f"[DEBUG] Brute force detected: {len(auth_failures)} 401s from {len(all_ips)} IPs (type: {attack_type})", file=sys.stderr)
-                print(f"[DEBUG] IP distribution: {dict(ip_failure_counts.head(5))}", file=sys.stderr)
-                
-                attacker_ips = all_ips
-                auth_failures_filtered = auth_failures
-                auth_failures_filtered = auth_failures_filtered
-                unique_ips = len(attacker_ips)
-                
-                # Extract targeted usernames
-                targeted_users = []
-                unique_users = 0
-                if "username" in auth_failures_filtered.columns:
-                    targeted_users = auth_failures_filtered["username"].dropna().unique().tolist()
-                    unique_users = len(targeted_users)
-                    print(f"[DEBUG] Targeted users ({unique_users}): {targeted_users}", file=sys.stderr)
-                
-                # Check for Account Takeover (200 OK from attacker IPs)
-                compromised_accounts = []
-                successful_logins = apache_df[
-                    (apache_df["source_ip"].isin(attacker_ips)) & 
-                    (apache_df["status_code"] == 200)
-                ]
-                
-                print(f"[DEBUG] Found {len(successful_logins)} successful logins (200 OK) from attacker IPs", file=sys.stderr)
-                
-                if len(successful_logins) > 0 and "username" in successful_logins.columns:
-                    compromised_users = successful_logins["username"].dropna().unique().tolist()
-                    print(f"[DEBUG] Compromised users: {compromised_users}", file=sys.stderr)
-                    
-                    for user in compromised_users:
-                        user_logins = successful_logins[successful_logins["username"] == user]
-                        ips = user_logins["source_ip"].unique().tolist()
-                        compromised_accounts.append({"user": str(user), "ips": [str(ip) for ip in ips]})
-                
-                # Create alert based on compromise status
-                if len(compromised_accounts) > 0:
-                    # CRITICAL: Account Takeover
-                    compromised_list = ", ".join([f"{acc['user']} (from {', '.join(acc['ips'][:2])})" for acc in compromised_accounts[:3]])
-                    alert_text = f"ACCOUNT TAKEOVER: Brute force ({len(auth_failures_filtered)} 401 failures from {unique_ips} IPs) successfully compromised {len(compromised_accounts)} accounts: {compromised_list}"
-                    print(f"[DEBUG] ✅ Creating ACCOUNT_TAKEOVER alert for {len(compromised_accounts)} accounts", file=sys.stderr)
-                    alerts.append({
-                        "type": "brute_force_success",
-                        "subject": "Web Security (Identity & Access)",
-                        "severity": "CRITICAL",
-                        "score": 10.0,
-                        "text": alert_text,
-                        "evidence": {
-                            "auth_failures": int(len(auth_failures)),
-                            "unique_ips": int(unique_ips),
-                            "targeted_users": [str(u) for u in targeted_users[:10]],
-                            "compromised_accounts": compromised_accounts,
-                            "attacker_ips": [str(ip) for ip in attacker_ips[:10]]
-                        },
-                        "prompt_ctx": {"behavior": {"type": "account_takeover", "compromised": len(compromised_accounts)}},
-                    })
-                else:
-                    # WARNING: Brute force attempt (no successful logins yet)
-                    users_preview = ", ".join([str(u) for u in targeted_users[:5]])
-                    alert_text = f"Credential stuffing: {len(auth_failures_filtered)} authentication failures from {unique_ips} IPs targeting {unique_users} users ({users_preview})"
-                    print(f"[DEBUG] ✅ Creating CREDENTIAL_STUFFING alert (no account takeover detected)", file=sys.stderr)
-                    alerts.append({
-                        "type": "apache_credential_stuffing",
-                        "subject": "Web Security",
-                        "severity": "CRITICAL",
-                        "score": 9.0,
-                        "text": alert_text,
-                        "evidence": {
-                            "auth_failures": int(len(auth_failures)),
-                            "unique_ips": int(unique_ips),
-                            "unique_users": int(unique_users),
-                            "targeted_users": [str(u) for u in targeted_users[:10]],
-                            "attacker_ips": [str(ip) for ip in attacker_ips[:10]]
-                        },
-                        "prompt_ctx": {"behavior": {"type": "credential_stuffing"}},
-                    })
         
-        # 1b. Detect Suspicious Operations (DELETE requests, 500 errors)
-        suspicious_ops = []
-        # Extract HTTP method if not present
+        # Extract additional fields needed for user behavior analysis
         if "method" not in apache_df.columns and "message" in apache_df.columns:
             def extract_method(msg):
                 if pd.isna(msg) or not isinstance(msg, str):
@@ -525,184 +429,310 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 return match.group(1) if match else None
             apache_df["method"] = apache_df["message"].apply(extract_method)
         
-        # Check DELETE requests to sensitive paths
-        if "method" in apache_df.columns and "path" in apache_df.columns:
-            delete_requests = apache_df[apache_df["method"].astype(str).str.upper() == "DELETE"]
-            if len(delete_requests) > 0:
-                sensitive_patterns = [r"/export/", r"/dbadmin", r"\.csv", r"\.sql", r"/leads", r"/backup"]
-                for pattern in sensitive_patterns:
-                    sensitive_deletes = delete_requests[delete_requests["path"].str.contains(pattern, case=False, regex=True, na=False)]
-                    if len(sensitive_deletes) > 0:
-                        suspicious_ops.extend(sensitive_deletes.to_dict('records'))
-        
-        # Check 500 Internal Server Errors
-        if "status_code" in apache_df.columns:
-            server_errors = apache_df[apache_df["status_code"] == 500]
-            if len(server_errors) > 5:
-                suspicious_ops.extend(server_errors.to_dict('records'))
-        
-        # Create alert for suspicious operations
-        if len(suspicious_ops) > 5:
-            users_involved = list(set([str(op.get("username", "unknown")) for op in suspicious_ops if op.get("username")]))
-            delete_count = sum(1 for op in suspicious_ops if str(op.get("method", "")).upper() == "DELETE")
-            error_count = sum(1 for op in suspicious_ops if op.get("status_code") == 500)
-            alert_text = f"Suspicious operations: {delete_count} DELETE requests + {error_count} 500 errors from users {', '.join(users_involved[:5])}"
-            alerts.append({
-                "type": "suspicious_app_behavior",
-                "subject": "Internal Operations",
-                "severity": "WARNING",
-                "score": 7.5,
-                "text": alert_text,
-                "evidence": {
-                    "total_suspicious_ops": len(suspicious_ops),
-                    "delete_requests": delete_count,
-                    "server_errors": error_count,
-                    "users_involved": users_involved[:10]
-                },
-                "prompt_ctx": {"behavior": {"type": "suspicious_operations"}},
-            })
-        
-        # 2. Detect Data Exfiltration (large export/download files)
-        if "path" in apache_df.columns and "message" in apache_df.columns:
-            # Extract bytes_sent from message if not available
-            if "bytes_sent" not in apache_df.columns:
-                def extract_bytes(msg):
-                    if pd.isna(msg) or not isinstance(msg, str):
-                        return None
-                    # Extract bytes from: "404 867" (status bytes)
-                    # Format: "GET /path HTTP/1.1" 200 12345
-                    match = re.search(r'"\s+\d+\s+(\d+)', msg)
-                    return match.group(1) if match else None
-                apache_df["bytes_sent"] = apache_df["message"].apply(extract_bytes)
-            
-            # Look for export/download patterns in paths
-            export_patterns = [r"/export/", r"/download/", r"\.csv", r"\.zip", r"\.sql", r"/backup", r"all_customers", r"full_dump", r"all_invoices"]
-            export_requests = apache_df[apache_df["path"].str.contains("|".join(export_patterns), case=False, regex=True, na=False)]
-            
-            if len(export_requests) > 0 and "bytes_sent" in export_requests.columns:
-                import sys
-                export_requests = export_requests.copy()
-                export_requests["bytes_num"] = pd.to_numeric(export_requests["bytes_sent"], errors="coerce")
-                
-                # Filter large exports (>50KB = 50000 bytes)
-                large_exports = export_requests[export_requests["bytes_num"] > 50000]
-                
-                print(f"[DEBUG] Found {len(export_requests)} export requests, {len(large_exports)} are large (>50KB)", file=sys.stderr)
-                
-                # Alert if >= 5 large exports (potential data exfiltration)
-                if len(large_exports) >= 5:
-                    total_mb = large_exports["bytes_num"].sum() / 1024 / 1024
-                    unique_users = large_exports["username"].nunique() if "username" in large_exports.columns else 0
-                    users_list = large_exports["username"].dropna().unique().tolist()[:10] if "username" in large_exports.columns else []
-                    
-                    # Get sample file names
-                    sample_paths = large_exports["path"].unique().tolist()[:5]
-                    
-                    alert_text = f"Data exfiltration spike: {len(large_exports)} large file downloads ({total_mb:.1f}MB total) by {unique_users} users. Files: {', '.join(sample_paths)}"
-                    print(f"[DEBUG] ✅ Creating DATA_EXFILTRATION alert: {len(large_exports)} files, {total_mb:.1f}MB", file=sys.stderr)
-                    
-                    alerts.append({
-                        "type": "data_exfiltration_spike",
-                        "subject": "Data Protection (Insider Threat?)",
-                        "severity": "CRITICAL",
-                        "score": 8.5,
-                        "text": alert_text,
-                        "evidence": {
-                            "large_exports": int(len(large_exports)),
-                            "total_mb": float(total_mb),
-                            "unique_users": int(unique_users),
-                            "users": [str(u) for u in users_list],
-                            "sample_files": [str(p) for p in sample_paths]
-                        },
-                        "prompt_ctx": {"behavior": {"type": "data_exfiltration"}},
-                    })
-        
-        # 2. Detect Path Probing (many unique paths from same IP)
-        if "path" in apache_df.columns and "source_ip" in apache_df.columns:
-            ip_paths = apache_df.groupby("source_ip")["path"].nunique()
-            probe_ips = ip_paths[ip_paths > 15]
-            if len(probe_ips) > 0:
-                max_paths = probe_ips.max()
-                alert_text = f"Path probing detected: {len(probe_ips)} IPs probing {int(max_paths)} unique paths"
-                alerts.append({
-                    "type": "apache_path_probing",
-                    "subject": "Web Security",
-                    "severity": "WARNING",
-                    "score": 7.0,
-                    "text": alert_text,
-                    "evidence": {"probe_ips": int(len(probe_ips)), "max_paths": int(max_paths)},
-                    "prompt_ctx": {"behavior": {"type": "apache_path_probing"}},
-                })
-        
-        # 3. Detect SQL Injection (SQLi patterns in path/query)
-        if "path" in apache_df.columns or "message" in apache_df.columns:
-            sqli_patterns = [r"union.*select", r"or\s+1\s*=\s*1", r"'.*or.*'", r"--", r";.*drop", r"exec\("]
-            path_col = apache_df["path"] if "path" in apache_df.columns else apache_df["message"]
-            sqli_attempts = path_col.str.contains("|".join(sqli_patterns), case=False, regex=True, na=False)
-            sqli_count = sqli_attempts.sum()
-            if sqli_count > 5:
-                unique_ips = apache_df[sqli_attempts]["source_ip"].nunique() if "source_ip" in apache_df.columns else 0
-                alert_text = f"SQL injection attempts detected: {int(sqli_count)} SQLi patterns from {int(unique_ips)} IPs"
-                alerts.append({
-                    "type": "apache_sqli_attempt",
-                    "subject": "Web Security",
-                    "severity": "CRITICAL",
-                    "score": 9.5,
-                    "text": alert_text,
-                    "evidence": {"sqli_attempts": int(sqli_count), "unique_ips": int(unique_ips)},
-                    "prompt_ctx": {"behavior": {"type": "apache_sqli"}},
-                })
-        
-        # Extract bytes_sent from message if not available
         if "bytes_sent" not in apache_df.columns and "message" in apache_df.columns:
             def extract_bytes(msg):
                 if pd.isna(msg) or not isinstance(msg, str):
                     return None
-                # Extract bytes from: "404 867" (status bytes)
-                # Format: "GET /path HTTP/1.1" 200 12345
                 match = re.search(r'"\s+\d+\s+(\d+)', msg)
                 return match.group(1) if match else None
             apache_df["bytes_sent"] = apache_df["message"].apply(extract_bytes)
+        apache_df["bytes_num"] = pd.to_numeric(apache_df["bytes_sent"], errors="coerce")
         
-        # 4. Detect Data Exfiltration (large export/download files)
-        if "path" in apache_df.columns and "bytes_sent" in apache_df.columns:
-            export_patterns = [r"/export/", r"/download/", r"\.csv", r"\.zip", r"\.sql", r"/backup"]
-            export_requests = apache_df[apache_df["path"].str.contains("|".join(export_patterns), case=False, regex=True, na=False)]
-            apache_df["bytes_num"] = pd.to_numeric(apache_df["bytes_sent"], errors="coerce")
-            large_exports = export_requests[export_requests["bytes_num"] > 200000]
-            if len(large_exports) > 3:
-                total_mb = large_exports["bytes_num"].sum() / 1024 / 1024
-                unique_users = large_exports["username"].nunique() if "username" in large_exports.columns else 0
-                alert_text = f"Data exfiltration via web: {len(large_exports)} large exports ({int(total_mb)}MB) by {int(unique_users)} users"
-                alerts.append({
-                    "type": "apache_export_exfil",
-                    "subject": "Web Security",
-                    "severity": "CRITICAL",
-                    "score": 9.0,
-                    "text": alert_text,
-                    "evidence": {"large_exports": int(len(large_exports)), "total_mb": int(total_mb), "unique_users": int(unique_users)},
-                    "prompt_ctx": {"behavior": {"type": "apache_exfiltration"}},
+        # ============================================================
+        # USER-CENTRIC DETECTION: Track all behaviors per user
+        # ============================================================
+        from collections import defaultdict
+        user_activities = defaultdict(lambda: {
+            "account_takeover": False,
+            "takeover_ips": [],
+            "account_takeover_internal": False,
+            "takeover_ips_internal": [],
+            "total_200_success_internal": 0,
+            "internal_movement": False,
+            "internal_ips": [],
+            "exfiltration_files": [],
+            "suspicious_operations": [],
+            "all_source_ips": set(),
+            "total_401_failures": 0,
+            "total_200_success": 0,
+        })
+        
+        # Step 1: Detect Brute Force & Account Takeover
+        auth_failures = apache_df[apache_df["status_code"] == 401]
+        print(f"[DEBUG] Found {len(auth_failures)} total 401 auth failures", file=sys.stderr)
+        
+        if len(auth_failures) > 5:
+            # Get all IPs involved in brute force
+            ip_failure_counts = auth_failures["source_ip"].value_counts()
+            all_ips = ip_failure_counts.index.tolist()
+            
+            # Track 401 failures per user
+            for idx, row in auth_failures.iterrows():
+                username = row.get("username")
+                if pd.notna(username) and username != "-":
+                    user_activities[username]["total_401_failures"] += 1
+                    user_activities[username]["all_source_ips"].add(row.get("source_ip"))
+            
+            # ============================================================
+            # ACCOUNT TAKEOVER DETECTION (FIXED - No False Positives)
+            # ============================================================
+            # OLD WRONG LOGIC:
+            #   all_ips = [IPs with 401]
+            #   successful_logins = [200 OK from any IP in all_ips]
+            #   => Flag ALL as takeover (FALSE POSITIVE for normal users)
+            #
+            # NEW CORRECT LOGIC:
+            #   For each IP:
+            #     IF same IP has BOTH 401 failures AND 200 success:
+            #       => Account Takeover (attacker succeeded!)
+            #     ELSE:
+            #       => Just brute force attempt, no compromise
+            
+            print(f"[DEBUG] Checking {len(all_ips)} IPs for Account Takeover (SAME IP must have both 401+200)", file=sys.stderr)
+            
+            # Helper function to check if IP is public
+            def is_public_ip(ip_str):
+                if pd.isna(ip_str):
+                    return False
+                ip = str(ip_str)
+                # Private IP ranges: 10.x.x.x, 192.168.x.x, 172.16-31.x.x
+                if ip.startswith("10.") or ip.startswith("192.168."):
+                    return False
+                if ip.startswith("172."):
+                    try:
+                        second_octet = int(ip.split(".")[1])
+                        if 16 <= second_octet <= 31:
+                            return False
+                    except:
+                        pass
+                return True  # Assume public if not in private ranges
+            
+            # For each IP that had failures, check if it ALSO had successes
+            takeover_count_public = 0
+            takeover_count_internal = 0
+            
+            for ip in all_ips:
+                # Get failures from THIS IP
+                ip_failures = auth_failures[auth_failures["source_ip"] == ip]
+                
+                # Get successes from THIS SAME IP
+                ip_successes = apache_df[(apache_df["source_ip"] == ip) & (apache_df["status_code"] == 200)]
+                
+                # ONLY flag if SAME IP has BOTH failures and successes
+                if len(ip_failures) > 0 and len(ip_successes) > 0:
+                    # This IP tried many times (401) then succeeded (200) = Real Attack!
+                    compromised_users = ip_successes["username"].dropna().unique().tolist()
+                    is_public = is_public_ip(ip)
+                    
+                    for user in compromised_users:
+                        if user and user != "-":
+                            user_logins = ip_successes[ip_successes["username"] == user]
+                            
+                            if is_public:
+                                # PUBLIC IP: CRITICAL 10.0 - External attack!
+                                user_activities[user]["account_takeover"] = True
+                                if ip not in user_activities[user]["takeover_ips"]:
+                                    user_activities[user]["takeover_ips"].append(ip)
+                                user_activities[user]["total_200_success"] += len(user_logins)
+                                takeover_count_public += 1
+                                print(f"[DEBUG] Account Takeover (Public) detected: {user} from {ip}", file=sys.stderr)
+                            else:
+                                # PRIVATE IP: WARNING 6.5 - Internal suspicious activity
+                                # Downgraded from CRITICAL per user feedback
+                                user_activities[user]["account_takeover_internal"] = True
+                                if ip not in user_activities[user]["takeover_ips_internal"]:
+                                    user_activities[user]["takeover_ips_internal"].append(ip)
+                                user_activities[user]["total_200_success_internal"] += len(user_logins)
+                                takeover_count_internal += 1
+                                # DON'T print debug for internal - too noisy
+            
+            if takeover_count_public > 0:
+                print(f"[DEBUG] Total Account Takeover (Public): {takeover_count_public} instances", file=sys.stderr)
+            if takeover_count_internal > 0:
+                print(f"[DEBUG] Total Account Takeover (Internal): {takeover_count_internal} instances (WARNING level)", file=sys.stderr)
+        
+        # Step 2: Detect Data Exfiltration (large file downloads)
+        export_patterns = [r"/export/", r"/download/", r"\.csv", r"\.zip", r"\.sql", r"/backup", r"all_customers", r"full_dump", r"all_invoices", r"/leads"]
+        export_requests = apache_df[apache_df["path"].str.contains("|".join(export_patterns), case=False, regex=True, na=False)]
+        
+        if len(export_requests) > 0:
+            large_exports = export_requests[export_requests["bytes_num"] > 50000]  # >50KB
+            print(f"[DEBUG] Found {len(large_exports)} large file downloads (>50KB)", file=sys.stderr)
+            
+            for idx, row in large_exports.iterrows():
+                username = row.get("username")
+                if pd.notna(username) and username != "-":
+                    user_activities[username]["exfiltration_files"].append({
+                        "path": row.get("path"),
+                        "size_mb": round(row.get("bytes_num", 0) / 1024 / 1024, 2),
+                        "timestamp": str(row.get("timestamp", ""))
+                    })
+                    user_activities[username]["all_source_ips"].add(row.get("source_ip"))
+        
+        # Step 3: Detect Suspicious Operations (DELETE requests + 500 errors)
+        delete_requests = apache_df[apache_df["method"].astype(str).str.upper() == "DELETE"]
+        server_errors = apache_df[apache_df["status_code"] == 500]
+        
+        for idx, row in delete_requests.iterrows():
+            username = row.get("username")
+            if pd.notna(username) and username != "-":
+                user_activities[username]["suspicious_operations"].append({
+                    "type": "DELETE",
+                    "path": row.get("path"),
+                    "status": int(row.get("status_code", 0)),
+                    "timestamp": str(row.get("timestamp", ""))
                 })
         
-        # 5. Detect Webshell Activity (suspicious paths: .php, admin/, config)
-        if "path" in apache_df.columns:
-            webshell_patterns = [r"phpinfo\.php", r"wp-login\.php", r"\.env", r"config\.php~", r"backup\.zip", r"server-status", r"\.git/config"]
-            webshell_requests = apache_df[apache_df["path"].str.contains("|".join(webshell_patterns), case=False, regex=True, na=False)]
-            if len(webshell_requests) > 10:
-                unique_ips = webshell_requests["source_ip"].nunique() if "source_ip" in webshell_requests.columns else 0
-                alert_text = f"Webshell/backdoor probing: {len(webshell_requests)} suspicious requests from {int(unique_ips)} IPs"
-                alerts.append({
-                    "type": "apache_webshell_probe",
-                    "subject": "Web Security",
-                    "severity": "CRITICAL",
-                    "score": 8.5,
-                    "text": alert_text,
-                    "evidence": {"webshell_requests": int(len(webshell_requests)), "unique_ips": int(unique_ips)},
-                    "prompt_ctx": {"behavior": {"type": "apache_webshell"}},
+        for idx, row in server_errors.iterrows():
+            username = row.get("username")
+            if pd.notna(username) and username != "-":
+                user_activities[username]["suspicious_operations"].append({
+                    "type": "500_ERROR",
+                    "path": row.get("path"),
+                    "method": row.get("method"),
+                    "timestamp": str(row.get("timestamp", ""))
                 })
+        
+        # ============================================================
+        # Generate Per-User Alerts
+        # ============================================================
+        print(f"[DEBUG] Generating alerts for {len(user_activities)} users", file=sys.stderr)
+        
+        for username, activities in user_activities.items():
+            # Skip if user has no significant activities
+            if (not activities["account_takeover"] and 
+                not activities["account_takeover_internal"] and
+                not activities["internal_movement"] and
+                len(activities["exfiltration_files"]) == 0 and 
+                len(activities["suspicious_operations"]) == 0 and
+                activities["total_401_failures"] < 5):
+                continue
+            
+            # ============================================================
+            # MULTIPLE ALERTS PER USER (separate by behavior type)
+            # ============================================================
+            
+            # ALERT 1: Account Takeover from Public IPs (CRITICAL 10.0)
+            if activities["account_takeover"]:
+                ips_str = ", ".join(activities["takeover_ips"][:3])
+                alert_text = f"User {username}: Account Takeover from PUBLIC IPs - {len(activities['takeover_ips'])} external IPs ({ips_str})"
+                alerts.append({
+                    "type": "account_takeover",
+                    "subject": username,
+                    "severity": "CRITICAL",
+                    "score": 10.0,
+                    "text": alert_text,
+                    "evidence": {
+                        "takeover_ips": activities["takeover_ips"],
+                        "total_200_success": activities["total_200_success"],
+                        "ip_classification": "public"
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "account_takeover", "from_public_ip": True}},
+                })
+            
+            # ALERT 1B: Account Takeover from Private IPs (WARNING 6.5 - Downgraded per user feedback)
+            if activities["account_takeover_internal"]:
+                ips_str = ", ".join(activities["takeover_ips_internal"][:3])
+                alert_text = f"User {username}: Suspicious activity - Login from internal IP after brute force - {len(activities['takeover_ips_internal'])} IPs ({ips_str})"
+                alerts.append({
+                    "type": "account_takeover_internal",
+                    "subject": username,
+                    "severity": "WARNING",  # Downgraded from CRITICAL
+                    "score": 6.5,  # Downgraded from 9.0
+                    "text": alert_text,
+                    "evidence": {
+                        "takeover_ips": activities["takeover_ips_internal"],
+                        "total_200_success": activities["total_200_success_internal"],
+                        "ip_classification": "private"
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "suspicious_internal_login", "from_public_ip": False}},
+                })
+            
+            # ALERT 2: Internal Movement (WARNING) - from Private IPs
+            if activities["internal_movement"]:
+                alert_text = f"User {username}: Suspicious internal movement - Login from {len(activities['internal_ips'])} different internal IPs"
+                alerts.append({
+                    "type": "internal_movement",
+                    "subject": username,
+                    "severity": "WARNING",
+                    "score": 6.5,
+                    "text": alert_text,
+                    "evidence": {
+                        "internal_ips": activities["internal_ips"],
+                        "ip_classification": "private"
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "lateral_movement"}},
+                })
+            
+            # ALERT 3: Data Exfiltration (CRITICAL/WARNING based on volume)
+            if len(activities["exfiltration_files"]) > 0:
+                total_mb = sum(f["size_mb"] for f in activities["exfiltration_files"])
+                file_names = [f["path"] for f in activities["exfiltration_files"][:3]]
+                alert_text = f"User {username}: Downloaded {len(activities['exfiltration_files'])} large files ({total_mb:.1f}MB) - {', '.join(file_names)}"
+                alerts.append({
+                    "type": "data_exfiltration",
+                    "subject": username,
+                    "severity": "CRITICAL" if total_mb > 5 else "WARNING",
+                    "score": 8.5 if total_mb > 5 else 7.0,
+                    "text": alert_text,
+                    "evidence": {
+                        "exfiltration_files_count": len(activities["exfiltration_files"]),
+                        "exfiltration_total_mb": round(total_mb, 2),
+                        "exfiltration_files": activities["exfiltration_files"][:5]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "data_exfiltration"}},
+                })
+            
+            # ALERT 4: Suspicious Operations (WARNING)
+            if len(activities["suspicious_operations"]) > 0:
+                delete_count = sum(1 for op in activities["suspicious_operations"] if op["type"] == "DELETE")
+                error_count = sum(1 for op in activities["suspicious_operations"] if op["type"] == "500_ERROR")
+                
+                if delete_count > 0 and error_count > 0:
+                    alert_text = f"User {username}: {delete_count} DELETE requests + {error_count} 500 errors"
+                elif delete_count > 0:
+                    alert_text = f"User {username}: {delete_count} DELETE requests"
+                else:
+                    alert_text = f"User {username}: {error_count} 500 server errors"
+                
+                alerts.append({
+                    "type": "suspicious_operations",
+                    "subject": username,
+                    "severity": "WARNING",
+                    "score": 7.5,
+                    "text": alert_text,
+                    "evidence": {
+                        "suspicious_operations_count": len(activities["suspicious_operations"]),
+                        "delete_count": delete_count,
+                        "error_count": error_count,
+                        "suspicious_operations": activities["suspicious_operations"][:5]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "suspicious_operations"}},
+                })
+            
+            # ALERT 5: Brute Force Target (if 401 failures without takeover)
+            if activities["total_401_failures"] >= 10 and not activities["account_takeover"]:
+                alert_text = f"User {username}: Brute force target - {activities['total_401_failures']} failed login attempts"
+                alerts.append({
+                    "type": "brute_force_target",
+                    "subject": username,
+                    "severity": "WARNING",
+                    "score": 7.0,
+                    "text": alert_text,
+                    "evidence": {
+                        "total_401_failures": activities["total_401_failures"],
+                        "all_source_ips": list(activities["all_source_ips"])[:10]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "brute_force_target"}},
+                })
+        
+        print(f"[DEBUG] Generated {len(alerts)} user-based alerts", file=sys.stderr)
     
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        import traceback
+        print(f"[DEBUG] Apache anomaly detection error: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
     
     return alerts
 
