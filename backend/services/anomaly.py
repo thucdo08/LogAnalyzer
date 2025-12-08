@@ -797,6 +797,112 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
     
     return alerts
 
+def _detect_network_link_flap(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Detect network link flapping (eth0 Link Up events on multiple servers).""" 
+    alerts = []
+    
+    if "message" not in df.columns or "host" not in df.columns:
+        return alerts
+    
+    try:
+        # Filter logs with "Link is Up" pattern
+        link_up_logs = df[df["message"].astype(str).str.contains(r"eth\d+:.*Link is Up", case=False, regex=True, na=False)].copy()
+        
+        if len(link_up_logs) == 0:
+            return alerts
+        
+        # Count unique servers and total events
+        unique_servers = link_up_logs["host"].nunique()
+        total_events = len(link_up_logs)
+        
+        # Alert if link flap affects many servers (network infrastructure issue)
+        if unique_servers >= 10 or total_events >= 20:
+            # Get affected servers list
+            affected_servers = link_up_logs["host"].unique().tolist()[:15]  # Top 15
+            
+            alert_text = f"Network link flap detected: eth0 Link Up on {unique_servers} servers ({total_events} events)"
+            
+            alerts.append({
+                "type": "network_link_flap",
+                "subject": "Network Infrastructure",
+                "severity": "CRITICAL" if unique_servers >= 15 else "WARNING",
+                "score": min(8.0 + (unique_servers / 10), 10.0),
+                "text": alert_text,
+                "evidence": {"unique_servers": int(unique_servers), "total_events": int(total_events), "affected_servers": [str(s) for s in affected_servers]},
+                "prompt_ctx": {"behavior": {"type": "network_link_flap"}},
+            })
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Network link flap error: {e}", file=sys.stderr)
+    return alerts
+
+def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Detect cron job overlaps (same script running multiple times by different users)."""
+    alerts = []
+    if "message" not in df.columns or "program" not in df.columns:
+        return alerts
+    try:
+        cron_logs = df[df["program"].astype(str).str.contains(r"cron\[", case=False, na=False)].copy()
+        if len(cron_logs) == 0:
+            return alerts
+        cron_logs["cron_user"] = cron_logs["message"].str.extract(r"\(([^)]+)\)\s+CMD", flags=re.IGNORECASE)[0]
+        cron_logs["cron_script"] = cron_logs["message"].str.extract(r"CMD\s+\(([^)]+)\)", flags=re.IGNORECASE)[0]
+        cron_logs = cron_logs[cron_logs["cron_script"].notna() & cron_logs["cron_user"].notna()]
+        if len(cron_logs) == 0:
+            return alerts
+        for script, group in cron_logs.groupby("cron_script"):
+            execution_count = len(group)
+            unique_users = group["cron_user"].nunique()
+            users_list = group["cron_user"].unique().tolist()
+            if execution_count >= 10 and unique_users >= 3:
+                host = group["host"].iloc[0] if "host" in group.columns else "unknown"
+                alert_text = f"Cron job overlap: script '{script}' executed {execution_count} times by {unique_users} users"
+                alerts.append({
+                    "type": "cron_job_overlap",
+                    "subject": str(host),
+                    "severity": "WARNING",
+                    "score": min(5.0 + (execution_count / 10), 8.0),
+                    "text": alert_text,
+                    "evidence": {"script": str(script), "execution_count": int(execution_count), "unique_users": int(unique_users), "users": [str(u) for u in users_list]},
+                    "prompt_ctx": {"behavior": {"type": "cron_job_overlap"}},
+                })
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Cron overlap error: {e}", file=sys.stderr)
+    return alerts
+
+def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Detect SSH successful login bursts (potential lateral movement)."""
+    alerts = []
+    if "message" not in df.columns or "program" not in df.columns:
+        return alerts
+    try:
+        ssh_logs = df[df["program"].astype(str).str.contains(r"sshd\[", case=False, na=False)].copy()
+        if len(ssh_logs) == 0:
+            return alerts
+        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted publickey", case=False, na=False)]
+        if len(successful_logins) == 0:
+            return alerts
+        login_count = len(successful_logins)
+        if login_count >= 30:
+            unique_hosts = successful_logins["host"].nunique() if "host" in successful_logins.columns else 0
+            affected_hosts = successful_logins["host"].unique().tolist()[:5] if "host" in successful_logins.columns else []
+            alert_text = f"SSH login burst: {login_count} successful logins to {unique_hosts} servers"
+            subject = f"CI/CD Infrastructure ({', '.join([str(h) for h in affected_hosts[:3]])})"
+            alerts.append({
+                "type": "ssh_login_burst",
+                "subject": subject,
+                "severity": "WARNING",
+                "score": min(5.0 + (login_count / 30), 8.0),
+                "text": alert_text,
+                "evidence": {"login_count": int(login_count), "unique_hosts": int(unique_hosts), "affected_hosts": [str(h) for h in affected_hosts]},
+                "prompt_ctx": {"behavior": {"type": "ssh_login_burst"}},
+            })
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] SSH burst error: {e}", file=sys.stderr)
+    return alerts
+
 def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[str, Any]]:
     """
     Step-2 generator: compare current window against stored baselines to produce human-readable alerts.
@@ -1902,6 +2008,18 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
     # Detector checks for Apache-specific columns (http_status, path, vhost) internally
     apache_alerts = _detect_apache_anomalies(df)
     alerts.extend(apache_alerts)
+    
+    # NEW: Network link flap detection (kernel Link Up events on multiple servers)
+    network_alerts = _detect_network_link_flap(df)
+    alerts.extend(network_alerts)
+    
+    # NEW: Cron job overlap detection (same script running multiple times)
+    cron_alerts = _detect_cron_job_overlap(df)
+    alerts.extend(cron_alerts)
+    
+    # NEW: SSH successful login burst detection (potential lateral movement)
+    ssh_burst_alerts = _detect_ssh_login_burst(df)
+    alerts.extend(ssh_burst_alerts)
 
     return alerts
 
