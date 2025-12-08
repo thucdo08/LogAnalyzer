@@ -955,7 +955,7 @@ def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
 
 def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect DNS-based attacks (amplification, DGA, NXDOMAIN storm, tunneling)."""
+    """Detect DNS-based attacks (amplification, DGA, NXDOMAIN storm, tunneling) - PER USER."""
     alerts = []
     
     if "program" not in df.columns or not df["program"].eq("dnsmasq").any():
@@ -966,73 +966,153 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
         if dns_df.empty:
             return alerts
         
-        # 1. Detect LARGE_ANSWER / NSEC amplification (DNS amplification attack)
-        large_answers = dns_df[dns_df["status"] == "large_answer"]
-        if len(large_answers) > 5:
-            unique_sources = large_answers["source_ip"].nunique()
-            alert_text = f"DNS amplification suspicious: {len(large_answers)} LARGE_ANSWER/NSEC responses detected from {unique_sources} clients"
-            alerts.append({
-                "type": "dns_amplification_spike",
-                "subject": "DNS Network",
-                "severity": "CRITICAL",
-                "score": 8.5,
-                "text": alert_text,
-                "evidence": {"large_answers": int(len(large_answers)), "unique_sources": int(unique_sources)},
-                "prompt_ctx": {"behavior": {"type": "dns_amplification"}},
-            })
+        # Extract username from DNS logs if available
+        # DNS logs may have username in message or separate field
+        if "username" not in dns_df.columns and "message" in dns_df.columns:
+            def extract_dns_user(msg):
+                if pd.isna(msg) or not isinstance(msg, str):
+                    return None
+                # Try to extract user from DNS log message
+                match = re.search(r'user[=:](\S+)', msg, re.IGNORECASE)
+                return match.group(1) if match else None
+            dns_df["username"] = dns_df["message"].apply(extract_dns_user)
         
-        # 2. Detect NXDOMAIN flood
-        nxdomains = dns_df[dns_df["status"] == "nxdomain"]
-        if len(nxdomains) > 10:
-            unique_sources = nxdomains["source_ip"].nunique()
-            alert_text = f"DNS NXDOMAIN flood: {len(nxdomains)} NXDOMAIN responses from {unique_sources} sources"
-            alerts.append({
-                "type": "dns_nxdomain_flood",
-                "subject": "DNS Network",
-                "severity": "WARNING",
-                "score": 6.5,
-                "text": alert_text,
-                "evidence": {"nxdomains": int(len(nxdomains)), "unique_sources": int(unique_sources)},
-                "prompt_ctx": {"behavior": {"type": "dns_nxdomain_flood"}},
-            })
+        # If still no username, prefer hostname over IP
+        if "username" not in dns_df.columns or dns_df["username"].isna().all():
+            # Priority 1: Use 'host' or 'hostname' field if available  
+            if "host" in dns_df.columns:
+                dns_df["username"] = dns_df["host"].fillna("unknown")
+            elif "hostname" in dns_df.columns:
+                dns_df["username"] = dns_df["hostname"].fillna("unknown")
+            # Priority 2: Fallback to source_ip
+            elif "source_ip" in dns_df.columns:
+                dns_df["username"] = dns_df["source_ip"].fillna("unknown")
+            else:
+                dns_df["username"] = "unknown"
         
-        # 3. Detect suspicious domains (high entropy, common DGA patterns)
-        if "domain" in dns_df.columns:
-            domains = dns_df["domain"].dropna().astype(str).unique()
-            suspicious_count = 0
-            suspicious_domains = []
-            for domain in domains[:50]:  # Check first 50 unique domains
-                # Simple heuristic: random-looking domains (high entropy)
-                if len(domain) > 20 or (len(domain) > 10 and not any(c in domain.lower() for c in "aeiou")):
-                    suspicious_count += 1
-                    suspicious_domains.append(domain)
+        import sys
+        from collections import defaultdict
+        
+        # Track DNS activities per user
+        user_activities = defaultdict(lambda: {
+            "amplification_queries": [],
+            "nxdomain_queries": [],
+            "suspicious_domains": [],
+            "tunneling_queries": [],
+            "total_queries": 0,
+        })
+        
+        # Track queries per user
+        for idx, row in dns_df.iterrows():
+            username = row.get("username")
+            if pd.isna(username) or username == "-":
+                username = row.get("source_ip", "unknown")
             
-            if suspicious_count >= 3:
-                alert_text = f"Potential DGA/Suspicious domains detected: {suspicious_count} domains with unusual patterns"
+            user_activities[username]["total_queries"] += 1
+            
+            # Track amplification (LARGE_ANSWER status)
+            if row.get("status") == "large_answer":
+                user_activities[username]["amplification_queries"].append({
+                    "domain": row.get("domain"),
+                    "timestamp": str(row.get("timestamp", ""))
+                })
+            
+            # Track NXDOMAIN
+            if row.get("status") == "nxdomain":
+                user_activities[username]["nxdomain_queries"].append({
+                    "domain": row.get("domain"),
+                    "timestamp": str(row.get("timestamp", ""))
+                })
+            
+            # Track suspicious domains (DGA-like)
+            domain = str(row.get("domain", ""))
+            if domain and len(domain) > 10:
+                # Simple DGA heuristic: long domain with few vowels
+                if len(domain) > 20 or (len(domain) > 10 and not any(c in domain.lower() for c in "aeiou")):
+                    user_activities[username]["suspicious_domains"].append({
+                        "domain": domain,
+                        "timestamp": str(row.get("timestamp", ""))
+                    })
+            
+            # Track DNS tunneling (TXT queries with suspicious patterns)
+            if row.get("query_type") == "TXT" and pd.notna(row.get("domain")):
+                if any(pattern in str(row.get("domain", "")).lower() for pattern in ["_dns", "exfil", "tunnel"]):
+                    user_activities[username]["tunneling_queries"].append({
+                        "domain": row.get("domain"),
+                        "timestamp": str(row.get("timestamp", ""))
+                    })
+        
+        print(f"[DEBUG] DNS: Analyzing {len(user_activities)} users/IPs", file=sys.stderr)
+        
+        # Generate alerts per user
+        for username, activities in user_activities.items():
+            # ALERT 1: DNS Amplification
+            if len(activities["amplification_queries"]) >= 3:
+                alert_text = f"User/IP {username}: {len(activities['amplification_queries'])} DNS amplification queries (LARGE_ANSWER/NSEC)"
+                alerts.append({
+                    "type": "dns_amplification",
+                    "subject": username,
+                    "severity": "CRITICAL",
+                    "score": 8.5,
+                    "text": alert_text,
+                    "evidence": {
+                        "amplification_count": len(activities["amplification_queries"]),
+                        "examples": activities["amplification_queries"][:5]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_amplification"}},
+                })
+            
+            # ALERT 2: NXDOMAIN Flood
+            if len(activities["nxdomain_queries"]) >= 10:
+                alert_text = f"User/IP {username}: {len(activities['nxdomain_queries'])} NXDOMAIN queries (potential scanning)"
+                alerts.append({
+                    "type": "dns_nxdomain_flood",
+                    "subject": username,
+                    "severity": "WARNING",
+                    "score": 6.5,
+                    "text": alert_text,
+                    "evidence": {
+                        "nxdomain_count": len(activities["nxdomain_queries"]),
+                        "examples": activities["nxdomain_queries"][:5]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_nxdomain_flood"}},
+                })
+            
+            # ALERT 3: Suspicious Domains (DGA/Malware)
+            if len(activities["suspicious_domains"]) >= 3:
+                unique_domains = list({d["domain"] for d in activities["suspicious_domains"]})
+                alert_text = f"User/IP {username}: {len(unique_domains)} suspicious domains (potential DGA/malware)"
                 alerts.append({
                     "type": "dns_suspicious_domains",
-                    "subject": "DNS Network",
+                    "subject": username,
                     "severity": "WARNING",
-                    "score": 7.0,
+                    "score": 7.5,
                     "text": alert_text,
-                    "evidence": {"suspicious_domain_count": suspicious_count, "examples": suspicious_domains[:3]},
-                    "prompt_ctx": {"behavior": {"type": "dns_dga"}},
+                    "evidence": {
+                        "suspicious_domain_count": len(unique_domains),
+                        "examples": unique_domains[:5],
+                        "details": activities["suspicious_domains"][:5]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_dga"}},
                 })
-        
-        # 4. Detect DNS tunneling (data exfiltration via TXT records)
-        if "domain" in dns_df.columns and "query_type" in dns_df.columns:
-            txt_queries = dns_df[(dns_df["query_type"] == "TXT") & (dns_df["domain"].str.contains("_dns|exfil|tunnel", case=False, na=False))]
-            if len(txt_queries) > 0:
-                alert_text = f"DNS tunneling/exfiltration detected: {len(txt_queries)} TXT queries with suspicious patterns"
+            
+            # ALERT 4: DNS Tunneling
+            if len(activities["tunneling_queries"]) > 0:
+                alert_text = f"User/IP {username}: {len(activities['tunneling_queries'])} DNS tunneling queries (data exfiltration)"
                 alerts.append({
-                    "type": "dns_tunneling_exfil",
-                    "subject": "DNS Network",
+                    "type": "dns_tunneling",
+                    "subject": username,
                     "severity": "CRITICAL",
                     "score": 9.0,
                     "text": alert_text,
-                    "evidence": {"txt_queries": int(len(txt_queries))},
-                    "prompt_ctx": {"behavior": {"type": "dns_tunneling"}},
+                    "evidence": {
+                        "tunneling_count": len(activities["tunneling_queries"]),
+                        "examples": activities["tunneling_queries"][:5]
+                    },
+                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_tunneling"}},
                 })
+        
+        print(f"[DEBUG] DNS: Generated {len(alerts)} user-based alerts", file=sys.stderr)
     
     except Exception:
         pass
