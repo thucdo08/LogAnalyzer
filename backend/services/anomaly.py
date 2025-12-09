@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 from datetime import timezone
 
+# Import unified scoring system
+from services import scoring
+
 
 def _to_dt_utc(df: pd.DataFrame) -> pd.DataFrame:
     if "timestamp" not in df.columns:
@@ -193,11 +196,14 @@ def _detect_dhcp_scope_conflicts(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 
                 alert_text = f"Thiết bị MAC {mac} nhận IP từ {unique_servers} DHCP servers khác nhau ({', '.join(servers_list)}) trong {len(unique_subnets)} subnets ({', '.join(subnets_list)}). Điều này có thể chỉ ra xung đột phạm vi DHCP hoặc máy chủ rogue."
                 
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dhcp_scope_conflict", [])
+                
                 alerts.append({
                     "type": "dhcp_scope_conflict",
                     "subject": user_str,
-                    "severity": "CRITICAL",
-                    "score": 9.0,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "mac_address": mac,
@@ -257,11 +263,14 @@ def _detect_dhcp_rogue_server(df: pd.DataFrame) -> List[Dict[str, Any]]:
             
             alert_text = f"Phát hiện tỷ lệ DHCP ACK bất thường: {max_rate} ACKs/phút (so với cơ sở 1-2/phút). Điều này có thể chỉ ra máy chủ rogue, cuộc tấn công NAK storm, hoặc cạn kiệt địa chỉ."
             
+            # Use unified scoring
+            score_data = scoring.get_alert_metadata("dhcp_rogue_server", [])
+            
             alerts.append({
                 "type": "dhcp_rogue_server_indication",
                 "subject": "DHCP Network",
-                "severity": "CRITICAL",
-                "score": 8.5,
+                "severity": score_data["severity"],
+                "score": score_data["score"],
                 "text": alert_text,
                 "evidence": {
                     "max_acks_per_minute": int(max_rate),
@@ -311,11 +320,14 @@ def _detect_dhcp_user_device_mismatch(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 
                 alert_text = f"Thiết bị '{device}' được sử dụng bởi {len(unique_users)} người dùng khác nhau trong {time_minutes} phút ({', '.join(users_list)}). Có thể chỉ ra cướp quyền điều khiển thiết bị hoặc chia sẻ trái phép."
                 
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dhcp_user_device_mismatch", [])
+                
                 alerts.append({
                     "type": "dhcp_device_user_mismatch",
                     "subject": device,
-                    "severity": "WARNING",
-                    "score": 6.5,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "device": device,
@@ -334,6 +346,122 @@ def _detect_dhcp_user_device_mismatch(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 })
     except Exception as e:
         pass  # Silently skip if error
+    
+    return alerts
+
+def _detect_dhcp_vlan_hopping(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect excessive VLAN/Interface changes (roaming) by same user.
+    Indicates network scanning, port hopping, or physical movement between network segments.
+    """
+    alerts = []
+    
+    if "username" not in df.columns or "timestamp" not in df.columns:
+        return alerts
+    
+    try:
+        # Group by username and analyze VLAN/Interface changes
+        for username, group in df[df["username"].notna()].groupby("username"):
+            username = str(username)
+            group = group.copy().sort_values("timestamp")
+            
+            # Track interface/VLAN changes
+            interfaces = set()
+            vlans = set()
+            
+            if "interface" in group.columns:
+                interfaces = set(group["interface"].dropna().astype(str).unique())
+            if "vlan" in group.columns:
+                vlans = set(group["vlan"].dropna().astype(str).unique())
+            
+            # Detect excessive roaming: 3+ interfaces OR 3+ VLANs
+            total_segments = len(interfaces) + len(vlans)
+            
+            if total_segments >= 5:  # Excessive roaming
+                time_span = group["timestamp"].max() - group["timestamp"].min()
+                time_minutes = int(time_span.total_seconds() / 60) if pd.notna(time_span) else 0
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dhcp_excessive_roaming", [])
+                
+                alerts.append({
+                    "type": "dhcp_excessive_roaming",
+                    "subject": username,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
+                    "text": f"User {username}: Excessive network roaming - {len(interfaces)} interfaces, {len(vlans)} VLANs in {time_minutes} minutes",
+                    "evidence": {
+                        "interfaces": list(interfaces),
+                        "vlans": list(vlans),
+                        "total_dhcp_events": len(group),
+                        "time_span_minutes": time_minutes,
+                    },
+                    "prompt_ctx": {
+                        "user": username,
+                        "group": None,
+                        "behavior": {"type": "vlan_hopping", "segments": total_segments},
+                        "time": None,
+                        "baseline": {},
+                        "extras": {"reason": "Rapid VLAN/Interface changes may indicate network scanning"},
+                    },
+                })
+    except Exception:
+        pass
+    
+    return alerts
+
+
+def _detect_dhcp_frequent_release(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect frequent DHCP RELEASE actions (manual IP release is uncommon for normal users).
+    May indicate IP evasion, troubleshooting, or unstable network configuration.
+    """
+    alerts = []
+    
+    if "action" not in df.columns or "username" not in df.columns:
+        return alerts
+    
+    try:
+        # Filter RELEASE actions
+        release_df = df[df["action"].astype(str).str.lower() == "release"].copy()
+        
+        if release_df.empty:
+            return alerts
+        
+        # Group by username
+        for username, group in release_df.groupby("username"):
+            username = str(username)
+            release_count = len(group)
+            
+            # 3+ releases is unusual for normal users
+            if release_count >= 3:
+                time_span = group["timestamp"].max() - group["timestamp"].min()
+                time_minutes = int(time_span.total_seconds() / 60) if pd.notna(time_span) else 0
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dhcp_frequent_release", [])
+                
+                alerts.append({
+                    "type": "dhcp_frequent_release",
+                    "subject": username,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
+                    "text": f"User {username}: Frequent IP release - {release_count} DHCPRELEASE in {time_minutes} minutes",
+                    "evidence": {
+                        "release_count": release_count,
+                        "time_span_minutes": time_minutes,
+                    },
+                    "prompt_ctx": {
+                        "user": username,
+                        "group": None,
+                        "behavior": {"type": "frequent_ip_release", "count": release_count},
+                        "time": None,
+                        "baseline": {"expected_releases": "0-1 per day"},
+                        "extras": {"reason": "Manual IP release may indicate IP evasion or network issues"},
+                    },
+                })
+    except Exception:
+        pass
     
     return alerts
 
@@ -612,15 +740,19 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
             # MULTIPLE ALERTS PER USER (separate by behavior type)
             # ============================================================
             
-            # ALERT 1: Account Takeover from Public IPs (CRITICAL 10.0)
+            # ALERT 1: Account Takeover from Public IPs
             if activities["account_takeover"]:
                 ips_str = ", ".join(activities["takeover_ips"][:3])
                 alert_text = f"User {username}: Account Takeover from PUBLIC IPs - {len(activities['takeover_ips'])} external IPs ({ips_str})"
+                
+                # Use unified scoring - public IP takeover = highest severity
+                score_data = scoring.get_alert_metadata("account_takeover", ["public_ip", "confirmed_success"])
+                
                 alerts.append({
                     "type": "account_takeover",
                     "subject": username,
-                    "severity": "CRITICAL",
-                    "score": 10.0,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "takeover_ips": activities["takeover_ips"],
@@ -630,15 +762,19 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     "prompt_ctx": {"user": username, "behavior": {"type": "account_takeover", "from_public_ip": True}},
                 })
             
-            # ALERT 1B: Account Takeover from Private IPs (WARNING 6.5 - Downgraded per user feedback)
+            # ALERT 1B: Account Takeover from Private IPs
             if activities["account_takeover_internal"]:
                 ips_str = ", ".join(activities["takeover_ips_internal"][:3])
                 alert_text = f"User {username}: Suspicious activity - Login from internal IP after brute force - {len(activities['takeover_ips_internal'])} IPs ({ips_str})"
+                
+                # Use unified scoring - internal IP modifier reduces score
+                score_data = scoring.get_alert_metadata("account_takeover_internal", ["internal_ip"])
+                
                 alerts.append({
                     "type": "account_takeover_internal",
                     "subject": username,
-                    "severity": "WARNING",  # Downgraded from CRITICAL
-                    "score": 6.5,  # Downgraded from 9.0
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "takeover_ips": activities["takeover_ips_internal"],
@@ -648,14 +784,18 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     "prompt_ctx": {"user": username, "behavior": {"type": "suspicious_internal_login", "from_public_ip": False}},
                 })
             
-            # ALERT 2: Internal Movement (WARNING) - from Private IPs
+            # ALERT 2: Internal Movement - from Private IPs
             if activities["internal_movement"]:
                 alert_text = f"User {username}: Suspicious internal movement - Login from {len(activities['internal_ips'])} different internal IPs"
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("internal_movement", ["internal_ip"])
+                
                 alerts.append({
                     "type": "internal_movement",
                     "subject": username,
-                    "severity": "WARNING",
-                    "score": 6.5,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "internal_ips": activities["internal_ips"],
@@ -664,16 +804,21 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     "prompt_ctx": {"user": username, "behavior": {"type": "lateral_movement"}},
                 })
             
-            # ALERT 3: Data Exfiltration (CRITICAL/WARNING based on volume)
+            # ALERT 3: Data Exfiltration
             if len(activities["exfiltration_files"]) > 0:
                 total_mb = sum(f["size_mb"] for f in activities["exfiltration_files"])
                 file_names = [f["path"] for f in activities["exfiltration_files"][:3]]
                 alert_text = f"User {username}: Downloaded {len(activities['exfiltration_files'])} large files ({total_mb:.1f}MB) - {', '.join(file_names)}"
+                
+                # Use unified scoring - add sensitive_data modifier if large volume
+                modifiers = ["sensitive_data"] if total_mb > 5 else []
+                score_data = scoring.get_alert_metadata("data_exfiltration", modifiers)
+                
                 alerts.append({
                     "type": "data_exfiltration",
                     "subject": username,
-                    "severity": "CRITICAL" if total_mb > 5 else "WARNING",
-                    "score": 8.5 if total_mb > 5 else 7.0,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "exfiltration_files_count": len(activities["exfiltration_files"]),
@@ -683,7 +828,7 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     "prompt_ctx": {"user": username, "behavior": {"type": "data_exfiltration"}},
                 })
             
-            # ALERT 4: Suspicious Operations (WARNING)
+            # ALERT 4: Suspicious Operations
             if len(activities["suspicious_operations"]) > 0:
                 delete_count = sum(1 for op in activities["suspicious_operations"] if op["type"] == "DELETE")
                 error_count = sum(1 for op in activities["suspicious_operations"] if op["type"] == "500_ERROR")
@@ -695,11 +840,14 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 else:
                     alert_text = f"User {username}: {error_count} 500 server errors"
                 
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("suspicious_operations", [])
+                
                 alerts.append({
                     "type": "suspicious_operations",
                     "subject": username,
-                    "severity": "WARNING",
-                    "score": 7.5,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "suspicious_operations_count": len(activities["suspicious_operations"]),
@@ -710,14 +858,18 @@ def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     "prompt_ctx": {"user": username, "behavior": {"type": "suspicious_operations"}},
                 })
             
-            # ALERT 5: Brute Force Target (if 401 failures without takeover)
+            # ALERT 5: Brute Force Target
             if activities["total_401_failures"] >= 10 and not activities["account_takeover"]:
                 alert_text = f"User {username}: Brute force target - {activities['total_401_failures']} failed login attempts"
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("brute_force_target", [])
+                
                 alerts.append({
                     "type": "brute_force_target",
                     "subject": username,
-                    "severity": "WARNING",
-                    "score": 7.0,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "total_401_failures": activities["total_401_failures"],
@@ -1049,11 +1201,15 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
             # ALERT 1: DNS Amplification
             if len(activities["amplification_queries"]) >= 3:
                 alert_text = f"User/IP {username}: {len(activities['amplification_queries'])} DNS amplification queries (LARGE_ANSWER/NSEC)"
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dns_amplification", [])
+                
                 alerts.append({
                     "type": "dns_amplification",
                     "subject": username,
-                    "severity": "CRITICAL",
-                    "score": 8.5,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "amplification_count": len(activities["amplification_queries"]),
@@ -1065,11 +1221,15 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
             # ALERT 2: NXDOMAIN Flood
             if len(activities["nxdomain_queries"]) >= 10:
                 alert_text = f"User/IP {username}: {len(activities['nxdomain_queries'])} NXDOMAIN queries (potential scanning)"
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dns_nxdomain_flood", [])
+                
                 alerts.append({
                     "type": "dns_nxdomain_flood",
                     "subject": username,
-                    "severity": "WARNING",
-                    "score": 6.5,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "nxdomain_count": len(activities["nxdomain_queries"]),
@@ -1082,11 +1242,15 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
             if len(activities["suspicious_domains"]) >= 3:
                 unique_domains = list({d["domain"] for d in activities["suspicious_domains"]})
                 alert_text = f"User/IP {username}: {len(unique_domains)} suspicious domains (potential DGA/malware)"
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dns_suspicious_domains", [])
+                
                 alerts.append({
                     "type": "dns_suspicious_domains",
                     "subject": username,
-                    "severity": "WARNING",
-                    "score": 7.5,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "suspicious_domain_count": len(unique_domains),
@@ -1099,11 +1263,15 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
             # ALERT 4: DNS Tunneling
             if len(activities["tunneling_queries"]) > 0:
                 alert_text = f"User/IP {username}: {len(activities['tunneling_queries'])} DNS tunneling queries (data exfiltration)"
+                
+                # Use unified scoring
+                score_data = scoring.get_alert_metadata("dns_tunneling", [])
+                
                 alerts.append({
                     "type": "dns_tunneling",
                     "subject": username,
-                    "severity": "CRITICAL",
-                    "score": 9.0,
+                    "severity": score_data["severity"],
+                    "score": score_data["score"],
                     "text": alert_text,
                     "evidence": {
                         "tunneling_count": len(activities["tunneling_queries"]),
@@ -1251,6 +1419,26 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
     global_stats = gs if isinstance(gs, dict) else {}
 
     alerts: List[Dict[str, Any]] = []
+    
+    # ===== DETECT LOG TYPE TO PREVENT HALLUCINATIONS =====
+    # DHCP logs only have IP allocation - NO database, NO downloads, NO login failures
+    is_dhcp = False
+    if "program" in df.columns:
+        dhcp_programs = df["program"].astype(str).str.contains("dhcpd|dhcp", case=False, na=False).any()
+        is_dhcp = dhcp_programs
+    # Alternative: check for typical DHCP actions
+    if not is_dhcp and "action" in df.columns:
+        dhcp_actions = df["action"].astype(str).str.lower().isin(["discover", "offer", "request", "ack", "nak", "release", "inform"]).any()
+        is_dhcp = dhcp_actions
+    
+    # ===== DHCP-SPECIFIC DETECTIONS =====
+    # Call DHCP behavior analysis functions for DHCP logs
+    if is_dhcp:
+        alerts.extend(_detect_dhcp_scope_conflicts(df))
+        alerts.extend(_detect_dhcp_rogue_server(df))
+        alerts.extend(_detect_dhcp_user_device_mismatch(df))
+        alerts.extend(_detect_dhcp_vlan_hopping(df))
+        alerts.extend(_detect_dhcp_frequent_release(df))
 
     # ===== SECTION 0: ENHANCED DETECTION FOR MIXED LOGS =====
     
@@ -1924,79 +2112,84 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                     })
 
     # 2) User activity deviation (events, ip diversity) using z-score
-    ua = _user_activity_features(df)
-    if not ua.empty and not user_stats.empty:
-        if "username" in ua.columns:
-            ua = ua.copy()
-            ua["username"] = ua["username"].astype(str)
-        cols = [
-            ("events", "events_mean", "events_std", "Số sự kiện"),
-            ("unique_src_ips", "unique_src_ips_mean", "unique_src_ips_std", "Số IP nguồn khác nhau"),
-            ("login_fail", "login_fail_mean", "login_fail_std", "Số lần đăng nhập thất bại"),
-        ]
-        for val_col, m_col, s_col, vi_label in cols:
-            if (val_col in ua.columns) and (m_col in user_stats.columns) and (s_col in user_stats.columns):
-                merged = ua[["username", val_col]].merge(user_stats[["username", m_col, s_col]], on="username", how="left")
-                for row in merged.itertuples(index=False):
-                    u = getattr(row, "username")
-                    cur = getattr(row, val_col)
-                    mu = getattr(row, m_col)
-                    sd = getattr(row, s_col)
-                    z = _safe_z(cur, mu if mu is not None else 0.0, sd if sd is not None else 0.0)
-                    
-                    # Improved detection logic:
-                    # 1. If std > 0: use Z-score >= 3.0 AND current > mean
-                    # 2. If std == 0: use simple threshold (current > mean + 20% or > 1.5x mean)
-                    has_variance = (sd is not None and sd > 0)
-                    if has_variance:
-                        anomaly_detected = z >= 3.0 and cur > (mu or 0)
-                    else:
-                        # No variance in baseline - use simple percentage threshold
-                        baseline_val = mu or 0
-                        anomaly_detected = (cur > baseline_val * 1.5) and (cur >= max(3, baseline_val))
-                    
-                    if anomaly_detected:
-                        ctx = {
-                            "user": u,
-                            "group": None,
-                            "behavior": {
-                                "type": val_col,
-                                "value": int(cur),
-                            },
-                            "time": None,
-                            "baseline": {
-                                "mean": float(mu or 0),
-                                "std": float(sd or 0),
-                            },
-                            "extras": {},
-                        }
-                        try:
-                            g = (
-                                df[df.get("username").astype(str)==str(u)]["group"].dropna().astype(str).unique()
-                                if "group" in df.columns else []
-                            )
-                            if len(g):
-                                ctx["group"] = g[0]
-                        except Exception:
-                            pass
+    # SKIP FOR DHCP: DHCP logs only have IP allocation, not user login/download events
+    if not is_dhcp:
+        ua = _user_activity_features(df)
+        if not ua.empty and not user_stats.empty:
+            if "username" in ua.columns:
+                ua = ua.copy()
+                ua["username"] = ua["username"].astype(str)
+            cols = [
+                ("events", "events_mean", "events_std", "Số sự kiện"),
+                ("unique_src_ips", "unique_src_ips_mean", "unique_src_ips_std", "Số IP nguồn khác nhau"),
+                ("login_fail", "login_fail_mean", "login_fail_std", "Số lần đăng nhập thất bại"),
+            ]
+            for val_col, m_col, s_col, vi_label in cols:
+                if (val_col in ua.columns) and (m_col in user_stats.columns) and (s_col in user_stats.columns):
+                    merged = ua[["username", val_col]].merge(user_stats[["username", m_col, s_col]], on="username", how="left")
+                    for row in merged.itertuples(index=False):
+                        u = getattr(row, "username")
+                        cur = getattr(row, val_col)
+                        mu = getattr(row, m_col)
+                        sd = getattr(row, s_col)
+                        z = _safe_z(cur, mu if mu is not None else 0.0, sd if sd is not None else 0.0)
                         
-                        # Adjust score based on variance
+                        # Improved detection logic:
+                        # 1. If std > 0: use Z-score >= 3.0 AND current > mean
+                        # 2. If std == 0: use simple threshold (current > mean + 20% or > 1.5x mean)
+                        has_variance = (sd is not None and sd > 0)
                         if has_variance:
-                            score = float(z)
+                            anomaly_detected = z >= 3.0 and cur > (mu or 0)
                         else:
-                            # If no variance, use ratio-based score
-                            ratio = (cur / (mu or 1)) if (mu or 0) > 0 else 1
-                            score = min(ratio * 2, 10.0)  # Cap at 10
+                            # No variance in baseline - use simple percentage threshold
+                            baseline_val = mu or 0
+                            anomaly_detected = (cur > baseline_val * 1.5) and (cur >= max(3, baseline_val))
                         
-                        alerts.append({
-                            "type": f"user_{val_col}_spike",
-                            "subject": u,
-                            "severity": "WARNING" if score < 5 else "CRITICAL",
-                            "score": score,
-                            "text": f"{vi_label} của user {u} tăng đột biến: {cur} so với trung bình {mu:.0f}±{sd:.0f}.",
-                            "evidence": {"current": int(cur), "mean": float(mu or 0), "std": float(sd or 0)},
-                            "prompt_ctx": ctx,
-                        })
+                        if anomaly_detected:
+                            ctx = {
+                                "user": u,
+                                "group": None,
+                                "behavior": {
+                                    "type": val_col,
+                                    "value": int(cur),
+                                },
+                                "time": None,
+                                "baseline": {
+                                    "mean": float(mu or 0),
+                                    "std": float(sd or 0),
+                                },
+                                "extras": {},
+                            }
+                            try:
+                                g = (
+                                    df[df.get("username").astype(str)==str(u)]["group"].dropna().astype(str).unique()
+                                    if "group" in df.columns else []
+                                )
+                                if len(g):
+                                    ctx["group"] = g[0]
+                            except Exception:
+                                pass
+                            
+                            # Use unified scoring system for severity mapping
+                            if has_variance:
+                                raw_score = float(z)
+                            else:
+                                # If no variance, use ratio-based score
+                                ratio = (cur / (mu or 1)) if (mu or 0) > 0 else 1
+                                raw_score = min(ratio * 2, 10.0)  # Cap at 10
+                            
+                            # Map score to severity using unified thresholds
+                            score_data = scoring.score_alert("anomalous_user_activity", [], raw_score)
+                            
+                            alerts.append({
+                                "type": f"user_{val_col}_spike",
+                                "subject": u,
+                                "severity": score_data["severity"],
+                                "score": score_data["score"],
+                                "text": f"{vi_label} của user {u} tăng đột biến: {cur} so với trung bình {mu:.0f}±{sd:.0f}.",
+                                "evidence": {"current": int(cur), "mean": float(mu or 0), "std": float(sd or 0)},
+                                "prompt_ctx": ctx,
+                            })
 
     # 2.5) Firewall/Network - Detect blocked/denied actions spike
     if "action" in df.columns and "status" in df.columns:
