@@ -1,0 +1,40 @@
+{
+  "generated_at": "2025-12-04T13:44:46.438696+00:00",
+  "summary": {
+    "total_alerts": 1,
+    "severity_breakdown": {
+      "WARNING": 1
+    },
+    "type_breakdown": {
+      "new_user": 1
+    },
+    "top_subjects": [
+      "unknown"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "new_user",
+      "subject": "unknown",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "User mới unknown xuất hiện với 25 sự kiện, chưa có trong baseline.",
+      "evidence": {
+        "events": 25
+      },
+      "prompt_ctx": {
+        "user": "unknown",
+        "group": null,
+        "behavior": {
+          "type": "new_user",
+          "events": 25
+        },
+        "time": null,
+        "baseline": {},
+        "extras": {
+          "reason": "User chưa có trong baseline"
+        }
+      }
+    }
+  ]
+}

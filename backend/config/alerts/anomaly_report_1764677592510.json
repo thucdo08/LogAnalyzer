@@ -1,0 +1,262 @@
+{
+  "generated_at": "2025-12-02T12:13:12.510672+00:00",
+  "summary": {
+    "total_alerts": 8,
+    "severity_breakdown": {
+      "CRITICAL": 5,
+      "WARNING": 3
+    },
+    "type_breakdown": {
+      "ssh_bruteforce_detected": 2,
+      "blocked_actions_spike": 1,
+      "off_hours_access": 5
+    },
+    "top_subjects": [
+      "10.48.132.131",
+      "phamtt",
+      "sales2",
+      "10.88.232.158",
+      "lehong",
+      "tranbinh",
+      "sales1"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "ssh_bruteforce_detected",
+      "subject": "10.48.132.131",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "SSH brute force detected from IP 10.48.132.131: 5/5 failed attempts (100.0% failure rate).",
+      "evidence": {
+        "source_ip": "10.48.132.131",
+        "total_attempts": 5,
+        "failed_attempts": 5,
+        "failure_rate": 1.0
+      },
+      "prompt_ctx": {
+        "user": null,
+        "group": null,
+        "behavior": {
+          "type": "ssh_bruteforce",
+          "source_ip": "10.48.132.131",
+          "attempts": 5,
+          "failures": 5
+        },
+        "time": null,
+        "baseline": {
+          "expected_failure_rate": 0.1
+        },
+        "extras": {
+          "reason": "High SSH login failure rate from 10.48.132.131"
+        }
+      }
+    },
+    {
+      "type": "ssh_bruteforce_detected",
+      "subject": "10.88.232.158",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "SSH brute force detected from IP 10.88.232.158: 6/6 failed attempts (100.0% failure rate).",
+      "evidence": {
+        "source_ip": "10.88.232.158",
+        "total_attempts": 6,
+        "failed_attempts": 6,
+        "failure_rate": 1.0
+      },
+      "prompt_ctx": {
+        "user": null,
+        "group": null,
+        "behavior": {
+          "type": "ssh_bruteforce",
+          "source_ip": "10.88.232.158",
+          "attempts": 6,
+          "failures": 6
+        },
+        "time": null,
+        "baseline": {
+          "expected_failure_rate": 0.1
+        },
+        "extras": {
+          "reason": "High SSH login failure rate from 10.88.232.158"
+        }
+      }
+    },
+    {
+      "type": "blocked_actions_spike",
+      "subject": "10.88.232.158",
+      "severity": "WARNING",
+      "score": 5.454545454545454,
+      "text": "Phát hiện 6/11 hành động bị chặn (54.5%) từ source_ip=10.88.232.158. Chi tiết: User: tranbinh | Host: crm-sf01 Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
+      "evidence": {
+        "blocked_count": 6,
+        "total_count": 11,
+        "ratio": 0.5454545454545454,
+        "source": "10.88.232.158",
+        "context": "User: tranbinh | Host: crm-sf01"
+      },
+      "prompt_ctx": {
+        "user": "tranbinh",
+        "group": null,
+        "behavior": {
+          "type": "blocked_actions_spike",
+          "ratio": 0.5454545454545454,
+          "count": 6,
+          "source": "10.88.232.158"
+        },
+        "time": null,
+        "baseline": {
+          "expected_ratio": 0.2
+        },
+        "extras": {
+          "reason": "High ratio of blocked/denied actions from 10.88.232.158"
+        }
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "sales1",
+      "severity": "WARNING",
+      "score": 4.7,
+      "text": "User sales1 truy cập ngoài giờ làm việc (7 sự kiện vào lúc [23]h).",
+      "evidence": {
+        "hours": [
+          23
+        ],
+        "events": 7
+      },
+      "prompt_ctx": {
+        "user": "sales1",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            23
+          ],
+          "events": 7
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "phamtt",
+      "severity": "CRITICAL",
+      "score": 5.0,
+      "text": "User phamtt truy cập ngoài giờ làm việc (10 sự kiện vào lúc [23]h).",
+      "evidence": {
+        "hours": [
+          23
+        ],
+        "events": 10
+      },
+      "prompt_ctx": {
+        "user": "phamtt",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            23
+          ],
+          "events": 10
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "tranbinh",
+      "severity": "CRITICAL",
+      "score": 5.2,
+      "text": "User tranbinh truy cập ngoài giờ làm việc (12 sự kiện vào lúc [23]h).",
+      "evidence": {
+        "hours": [
+          23
+        ],
+        "events": 12
+      },
+      "prompt_ctx": {
+        "user": "tranbinh",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            23
+          ],
+          "events": 12
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "sales2",
+      "severity": "CRITICAL",
+      "score": 5.1,
+      "text": "User sales2 truy cập ngoài giờ làm việc (11 sự kiện vào lúc [23]h).",
+      "evidence": {
+        "hours": [
+          23
+        ],
+        "events": 11
+      },
+      "prompt_ctx": {
+        "user": "sales2",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            23
+          ],
+          "events": 11
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "lehong",
+      "severity": "WARNING",
+      "score": 4.9,
+      "text": "User lehong truy cập ngoài giờ làm việc (9 sự kiện vào lúc [23]h).",
+      "evidence": {
+        "hours": [
+          23
+        ],
+        "events": 9
+      },
+      "prompt_ctx": {
+        "user": "lehong",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            23
+          ],
+          "events": 9
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    }
+  ]
+}

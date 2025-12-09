@@ -46,7 +46,6 @@ from services.analyzer import analyze_logs_with_openai, summarize_levels
 from services.postprocess import postprocess
 
 load_dotenv()
-
 app = Flask(__name__)
 CORS(app)
 app.config["JSON_AS_ASCII"] = False

