@@ -231,13 +231,23 @@ def anomaly_raw():
                 "router_ios": "router",
                 "named": "dns",
                 "winevent": "windows_eventlog",
+                "security": "windows_eventlog",
+                "system": "windows_eventlog",
+                "sysmon": "windows_eventlog",  # ← Sysmon is Windows Event Log channel, NOT EDR
                 "dhcpd": "dhcp",
                 "apache": "apache",
                 "squid": "proxy",
                 "suricata": "ids",
                 "edr_network": "edrnetwork",
-                "sysmon": "edr",
+                "edr_sysmon": "edr",  # ← Only edr_sysmon (from EDR agent) → edr
                 "syslog": "syslog",
+                # Linux/Unix programs → syslog
+                "sshd": "linuxsyslog",
+                "sudo": "linuxsyslog",
+                "cron": "linuxsyslog",
+                "kernel": "linuxsyslog",
+                "systemd": "linuxsyslog",
+                "auth": "linuxsyslog",
             }
             for prog in programs:
                 for key, val in log_type_map.items():
@@ -491,13 +501,23 @@ def analyze():
                 "router_ios": "router",
                 "named": "dns",
                 "winevent": "windows_eventlog",
+                "security": "windows_eventlog",
+                "system": "windows_eventlog",
+                "sysmon": "windows_eventlog",  # ← Sysmon is Windows Event Log channel, NOT EDR
                 "dhcpd": "dhcp",
                 "apache": "apache",
                 "squid": "proxy",
                 "suricata": "ids",
                 "edr_network": "edrnetwork",
-                "sysmon": "edr",
+                "edr_sysmon": "edr",  # ← Only edr_sysmon (from EDR agent) → edr
                 "syslog": "syslog",
+                # Linux/Unix programs → syslog
+                "sshd": "linuxsyslog",
+                "sudo": "linuxsyslog",
+                "cron": "linuxsyslog",
+                "kernel": "linuxsyslog",
+                "systemd": "linuxsyslog",
+                "auth": "linuxsyslog",
             }
             for prog in programs:
                 for key, val in log_type_map.items():
@@ -1000,6 +1020,133 @@ def _json_merge_groups(out_path: str, new_groups: dict):
     _safe_atomic_write_text(out_path, json.dumps(old, ensure_ascii=False, indent=2))
 
 
+def _detect_log_type_from_df(df: pd.DataFrame) -> str:
+    """
+    Phát hiện log_type từ DataFrame sau khi preprocess.
+    Ưu tiên:
+    1. Kiểm tra các cột đặc trưng (Channel, EventID, etc.)
+    2. Kiểm tra message/content patterns để phân biệt Windows EventLog vs EDR Sysmon
+    3. Kiểm tra program column
+    4. Kiểm tra fields trong message
+    """
+    if df is None or df.empty:
+        return None
+    
+    # Get message column
+    message_col = None
+    if "message" in df.columns:
+        message_col = "message"
+    elif "Message" in df.columns:
+        message_col = "Message"
+    
+    # === LEVEL 1: Column Check (Most Reliable) ===
+    # EDR has destination_ip column (network connection)
+    if "destination_ip" in df.columns or "destination_port" in df.columns:
+        return "edr"
+    
+    # Windows EventLog has special columns
+    if "channel" in df.columns or "Channel" in df.columns or "EventID" in df.columns:
+        return "windows_eventlog"
+    
+    # === LEVEL 2: Message Pattern Check (Distinguish Windows EventLog vs EDR Sysmon) ===
+    if message_col is not None:
+        sample = df[message_col].dropna().astype(str).head(50)
+        sample_list = sample.tolist()
+        
+        # Check for EDR Sysmon pattern: "Sysmon: EventID=..." (without Host= at start)
+        edr_hits = sum(1 for msg in sample_list if msg.lstrip().startswith("Sysmon:") or "Sysmon: EventID=" in msg)
+        
+        # Check for Windows EventLog pattern: "Host=... Channel=..." or "Host=... EventID=..."
+        windows_hits = sum(1 for msg in sample_list if any(x in msg for x in ["Channel=", "EventID=", "TargetFilename="]) and ("Host=" in msg or "Image=" not in msg))
+        
+        threshold = max(3, len(sample_list) // 4)  # > 25% matches
+        
+        # EDR Sysmon has characteristic "Sysmon:" prefix
+        if edr_hits >= threshold:
+            return "edr"
+        
+        # Windows EventLog has "Host=" + Windows-specific fields
+        if windows_hits >= threshold:
+            return "windows_eventlog"
+    
+    # === LEVEL 3: Program Column Mapping (with EDR/Windows distinction) ===
+    if "program" in df.columns:
+        programs = df["program"].dropna().astype(str).str.lower().unique().tolist()
+        
+        # For "sysmon" program, need to check message content to distinguish
+        if "sysmon" in programs:
+            # Re-check message to see if it's EDR or Windows EventLog
+            if message_col is not None:
+                sample = df[message_col].dropna().astype(str).head(30)
+                
+                # EDR pattern: "Sysmon: EventID=3 ... Image=... DestinationIp=..."
+                edr_indicators = sum(1 for msg in sample if ("DestinationIp=" in msg or "SrcIp=" in msg) and "Image=" in msg)
+                
+                # Windows pattern: "Host=... Channel=Sysmon" or key-value pairs with Channel
+                windows_indicators = sum(1 for msg in sample if "Host=" in msg or "Channel=" in msg)
+                
+                if edr_indicators > windows_indicators and edr_indicators > 0:
+                    return "edr"
+                elif windows_indicators > edr_indicators and windows_indicators > 0:
+                    return "windows_eventlog"
+        
+        # Standard program mapping
+        log_type_map = {
+            "firewall": "firewall",
+            "router_ios": "router",
+            "named": "dns",
+            "dnsmasq": "dns",
+            "winevent": "windows_eventlog",
+            "security": "windows_eventlog",
+            "system": "windows_eventlog",
+            "sysmon": "windows_eventlog",  # ← Default: Sysmon is Windows Event Log channel (fallback if above checks fail)
+            "dhcpd": "dhcp",
+            "apache": "apache",
+            "httpd": "apache",
+            "squid": "proxy",
+            "suricata": "ids",
+            "edr_network": "edrnetwork",
+            "edr_sysmon": "edr",
+            "syslog": "syslog",
+            # Linux/Unix programs
+            "sshd": "linuxsyslog",
+            "sudo": "linuxsyslog",
+            "cron": "linuxsyslog",
+            "kernel": "linuxsyslog",
+            "systemd": "linuxsyslog",
+            "auth": "linuxsyslog",
+        }
+        
+        for prog in programs:
+            for key, val in log_type_map.items():
+                if key in prog:
+                    return val
+    
+    # === LEVEL 4: Fallback Pattern Matching ===
+    if message_col is not None:
+        sample = df[message_col].dropna().astype(str).head(50)
+        
+        # Detect Linux syslog patterns
+        syslog_hits = sum(1 for msg in sample if any(
+            pattern in msg for pattern in ["sshd[", "sudo[", "cron[", "kernel:", "systemd["]
+        ))
+        if syslog_hits > len(sample) / 4:
+            return "linuxsyslog"
+        
+        # Detect firewall patterns
+        firewall_hits = sum(1 for msg in sample if "action=" in msg.lower() or "proto=" in msg.lower())
+        if firewall_hits > len(sample) / 4:
+            return "firewall"
+        
+        # Detect Apache patterns
+        apache_hits = sum(1 for msg in sample if "GET " in msg or "POST " in msg or "HTTP/" in msg)
+        if apache_hits > len(sample) / 4:
+            return "apache"
+    
+    return None
+
+
+
 # ===================== Baseline TRAIN endpoint (append/merge) =====================
 @app.post("/baseline/train")
 def baseline_train():
@@ -1043,7 +1190,7 @@ def baseline_train():
             except Exception:
                 group_rules = None
 
-        # === Detect log type from program column (after preprocess) ===
+        # === Detect log type from files (after preprocess) ===
         frames = []
         detected_type = None
         
@@ -1053,33 +1200,8 @@ def baseline_train():
                 frames.append(df_part)
                 
                 # Detect log type từ lần xử lý đầu tiên
-                if detected_type is None and "program" in df_part.columns:
-                    programs = df_part["program"].dropna().astype(str).str.lower().unique().tolist()
-                    # Map program to log type
-                    log_type_map = {
-                        "firewall": "firewall",
-                        "router_ios": "router",
-                        "named": "dns",
-                        "dnsmasq": "dns",
-                        "winevent": "windows_eventlog",
-                        "security": "windows_eventlog",  # ← Windows EventLog Security channel
-                        "system": "windows_eventlog",    # ← Windows EventLog System channel
-                        "sysmon": "edr",  # ← Keep as edr for backwards compat
-                        "dhcpd": "dhcp",
-                        "apache": "apache",
-                        "squid": "proxy",
-                        "suricata": "ids",
-                        "edr_network": "edrnetwork",
-                        "edr_sysmon": "edr",
-                        "syslog": "syslog",
-                    }
-                    for prog in programs:
-                        for key, val in log_type_map.items():
-                            if key in prog:
-                                detected_type = val
-                                break
-                        if detected_type:
-                            break
+                if detected_type is None:
+                    detected_type = _detect_log_type_from_df(df_part)
             except Exception as fe:
                 print("Baseline train: skip file due to error:", f.filename, fe)
         
