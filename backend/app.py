@@ -1060,14 +1060,17 @@ def baseline_train():
                         "firewall": "firewall",
                         "router_ios": "router",
                         "named": "dns",
+                        "dnsmasq": "dns",
                         "winevent": "windows_eventlog",
+                        "security": "windows_eventlog",  # ← Windows EventLog Security channel
+                        "system": "windows_eventlog",    # ← Windows EventLog System channel
+                        "sysmon": "edr",  # ← Keep as edr for backwards compat
                         "dhcpd": "dhcp",
                         "apache": "apache",
                         "squid": "proxy",
                         "suricata": "ids",
                         "edr_network": "edrnetwork",
                         "edr_sysmon": "edr",
-                        "sysmon": "edr",
                         "syslog": "syslog",
                     }
                     for prog in programs:
@@ -1102,6 +1105,7 @@ def baseline_train():
             group_stats, group_models = build_group_baselines(df_hist, group_col="group", default_group=default_group)
         except Exception:
             group_stats, group_models = pd.DataFrame(), {}
+        
         global_stats = build_global_baseline(df_hist)
 
         # === LƯU GỘP (append/merge) - all in one common baselines folder ===

@@ -1,0 +1,1296 @@
+{
+  "generated_at": "2025-12-09T11:42:29.607849+00:00",
+  "summary": {
+    "total_alerts": 37,
+    "severity_breakdown": {
+      "CRITICAL": 1,
+      "WARNING": 36
+    },
+    "type_breakdown": {
+      "sensitive_db_access_detected": 1,
+      "account_takeover_internal": 11,
+      "suspicious_operations": 22,
+      "data_exfiltration": 3
+    },
+    "top_subjects": [
+      "linhfin",
+      "trinhk",
+      "thuongf",
+      "tranbinh",
+      "ngocmai",
+      "huydev",
+      "netops",
+      "admin2",
+      "phamtt",
+      "minhtq"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "sensitive_db_access_detected",
+      "subject": "None",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "Sensitive database operation by None: 10.243.246.222 - tnghia [27/oct/2025:11:13:18 +0000] \"get /artifacts/pkg-1.2.3.tgz http/1.1\" 200 88672 \"-\" \"mozilla/5.0 (macintosh; intel mac os x 10_15_7) device/tnghia-nb dept/engineering\" vhost=git",
+      "evidence": {
+        "operation": "destructive_operation",
+        "message": "10.243.246.222 - tnghia [27/oct/2025:11:13:18 +0000] \"get /artifacts/pkg-1.2.3.tgz http/1.1\" 200 88672 \"-\" \"mozilla/5.0 (macintosh; intel mac os x 10_15_7) device/tnghia-nb dept/engineering\" vhost=gitsrv01.company.local host=gitsrv01\n10.28.125.42 - admin1 [27/oct/2025:10:03:01 +0000] \"delete /admin "
+      },
+      "prompt_ctx": {
+        "user": "None",
+        "group": null,
+        "behavior": {
+          "type": "database_access",
+          "operation": "destructive_operation"
+        },
+        "time": "06:52 PM, Thứ Ba, 09/12/2025",
+        "baseline": {},
+        "extras": {
+          "reason": "Sensitive database operation detected"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "thuongf",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User thuongf: Suspicious activity - Login from internal IP after brute force - 3 IPs (10.103.117.155, 10.103.170.222, 10.230.65.53)",
+      "evidence": {
+        "takeover_ips": [
+          "10.103.117.155",
+          "10.103.170.222",
+          "10.230.65.53"
+        ],
+        "total_200_success": 34,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "thuongf",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "thuongf",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User thuongf: 13 DELETE requests + 2 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 15,
+        "delete_count": 13,
+        "error_count": 2,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:02+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:03+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 500,
+            "timestamp": "2025-12-09 11:44:05+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/home",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:07+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:09+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "thuongf",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "trinhk",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User trinhk: Suspicious activity - Login from internal IP after brute force - 3 IPs (10.103.117.155, 10.103.170.222, 10.230.65.53)",
+      "evidence": {
+        "takeover_ips": [
+          "10.103.117.155",
+          "10.103.170.222",
+          "10.230.65.53"
+        ],
+        "total_200_success": 26,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "trinhk",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "trinhk",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User trinhk: 4 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 4,
+        "delete_count": 4,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/dbadmin",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:57+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:58+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:45:00+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:51:09+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "trinhk",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "anhthu",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User anhthu: Suspicious activity - Login from internal IP after brute force - 3 IPs (10.103.117.155, 10.103.170.222, 10.230.65.53)",
+      "evidence": {
+        "takeover_ips": [
+          "10.103.117.155",
+          "10.103.170.222",
+          "10.230.65.53"
+        ],
+        "total_200_success": 18,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "anhthu",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "anhthu",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User anhthu: 10 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 10,
+        "delete_count": 10,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/dbadmin",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:35+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:37+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:19+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:44:22+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/logout",
+            "status": 200,
+            "timestamp": "2025-12-09 11:45:26+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "anhthu",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "admin1",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User admin1: Suspicious activity - Login from internal IP after brute force - 2 IPs (10.152.112.176, 10.152.16.207)",
+      "evidence": {
+        "takeover_ips": [
+          "10.152.112.176",
+          "10.152.16.207"
+        ],
+        "total_200_success": 5,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "admin1",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "admin1",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User admin1: 1 DELETE requests + 1 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 1,
+        "error_count": 1,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:25+00:00"
+          },
+          {
+            "type": "500_ERROR",
+            "path": "/admin",
+            "method": "PUT",
+            "timestamp": "2025-12-09 11:42:57+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "admin1",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "itops",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User itops: Suspicious activity - Login from internal IP after brute force - 2 IPs (10.152.112.176, 10.152.16.207)",
+      "evidence": {
+        "takeover_ips": [
+          "10.152.112.176",
+          "10.152.16.207"
+        ],
+        "total_200_success": 10,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "itops",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "itops",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User itops: 1 DELETE requests + 1 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 1,
+        "error_count": 1,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/metrics",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:57+00:00"
+          },
+          {
+            "type": "500_ERROR",
+            "path": "/login",
+            "method": "POST",
+            "timestamp": "2025-12-09 11:48:00+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "itops",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "linhfin",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User linhfin: Suspicious activity - Login from internal IP after brute force - 3 IPs (10.103.117.155, 10.103.170.222, 10.230.65.53)",
+      "evidence": {
+        "takeover_ips": [
+          "10.103.117.155",
+          "10.103.170.222",
+          "10.230.65.53"
+        ],
+        "total_200_success": 29,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "linhfin",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "linhfin",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User linhfin: 2 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 2,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:49+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/logout",
+            "status": 302,
+            "timestamp": "2025-12-09 11:51:33+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "linhfin",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "ngocmai",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User ngocmai: Suspicious activity - Login from internal IP after brute force - 3 IPs (10.103.117.155, 10.103.170.222, 10.230.65.53)",
+      "evidence": {
+        "takeover_ips": [
+          "10.103.117.155",
+          "10.103.170.222",
+          "10.230.65.53"
+        ],
+        "total_200_success": 21,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "ngocmai",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "ngocmai",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User ngocmai: 3 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 3,
+        "delete_count": 3,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/erp/home",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:52+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/payroll/summary",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:56+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/erp/api/invoices",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:54+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "ngocmai",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "admin2",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User admin2: Suspicious activity - Login from internal IP after brute force - 2 IPs (10.152.112.176, 10.152.16.207)",
+      "evidence": {
+        "takeover_ips": [
+          "10.152.112.176",
+          "10.152.16.207"
+        ],
+        "total_200_success": 12,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "admin2",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "admin2",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User admin2: 3 DELETE requests + 1 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 4,
+        "delete_count": 3,
+        "error_count": 1,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/auth/keys",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:30+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/auth/keys",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:01+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/metrics",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:43+00:00"
+          },
+          {
+            "type": "500_ERROR",
+            "path": "/admin",
+            "method": "POST",
+            "timestamp": "2025-12-09 11:43:03+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "admin2",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "backup",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User backup: Suspicious activity - Login from internal IP after brute force - 2 IPs (10.152.112.176, 10.152.16.207)",
+      "evidence": {
+        "takeover_ips": [
+          "10.152.112.176",
+          "10.152.16.207"
+        ],
+        "total_200_success": 9,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "backup",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "backup",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User backup: 5 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 5,
+        "delete_count": 5,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:32+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/logout",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:33+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/admin",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:36+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/metrics",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:51+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/ssh/term",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:53+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "backup",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "netops",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User netops: Suspicious activity - Login from internal IP after brute force - 2 IPs (10.152.112.176, 10.152.16.207)",
+      "evidence": {
+        "takeover_ips": [
+          "10.152.112.176",
+          "10.152.16.207"
+        ],
+        "total_200_success": 9,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "netops",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "netops",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User netops: 5 DELETE requests + 1 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 6,
+        "delete_count": 5,
+        "error_count": 1,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:46+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/admin/audit",
+            "status": 500,
+            "timestamp": "2025-12-09 11:42:49+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/metrics",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:17+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/admin",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:19+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:48:33+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "netops",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "account_takeover_internal",
+      "subject": "svc_monitor",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "User svc_monitor: Suspicious activity - Login from internal IP after brute force - 2 IPs (10.152.112.176, 10.152.16.207)",
+      "evidence": {
+        "takeover_ips": [
+          "10.152.112.176",
+          "10.152.16.207"
+        ],
+        "total_200_success": 10,
+        "ip_classification": "private"
+      },
+      "prompt_ctx": {
+        "user": "svc_monitor",
+        "behavior": {
+          "type": "suspicious_internal_login",
+          "from_public_ip": false
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "svc_monitor",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User svc_monitor: 2 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 2,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:42:54+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/admin",
+            "status": 200,
+            "timestamp": "2025-12-09 11:43:22+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "svc_monitor",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "data_exfiltration",
+      "subject": "phamtt",
+      "severity": "WARNING",
+      "score": 7.0,
+      "text": "User phamtt: Downloaded 2 large files (0.1MB) - /export/leads.csv, /export/leads.csv",
+      "evidence": {
+        "exfiltration_files_count": 2,
+        "exfiltration_total_mb": 0.15,
+        "exfiltration_files": [
+          {
+            "path": "/export/leads.csv",
+            "size_mb": 0.09,
+            "timestamp": "2025-12-09 11:46:18+00:00"
+          },
+          {
+            "path": "/export/leads.csv",
+            "size_mb": 0.06,
+            "timestamp": "2025-12-09 11:49:27+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "phamtt",
+        "behavior": {
+          "type": "data_exfiltration"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "phamtt",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User phamtt: 6 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 6,
+        "delete_count": 6,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/api/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:46:15+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/reports/q3",
+            "status": 200,
+            "timestamp": "2025-12-09 11:46:17+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/profile",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:22+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/export/leads.csv",
+            "status": 200,
+            "timestamp": "2025-12-09 11:48:43+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 302,
+            "timestamp": "2025-12-09 11:49:36+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "phamtt",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "data_exfiltration",
+      "subject": "sales1",
+      "severity": "WARNING",
+      "score": 7.0,
+      "text": "User sales1: Downloaded 3 large files (0.2MB) - /export/leads.csv, /export/leads.csv, /export/leads.csv",
+      "evidence": {
+        "exfiltration_files_count": 3,
+        "exfiltration_total_mb": 0.22,
+        "exfiltration_files": [
+          {
+            "path": "/export/leads.csv",
+            "size_mb": 0.07,
+            "timestamp": "2025-12-09 11:48:44+00:00"
+          },
+          {
+            "path": "/export/leads.csv",
+            "size_mb": 0.09,
+            "timestamp": "2025-12-09 11:48:58+00:00"
+          },
+          {
+            "path": "/export/leads.csv",
+            "size_mb": 0.06,
+            "timestamp": "2025-12-09 11:49:38+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "sales1",
+        "behavior": {
+          "type": "data_exfiltration"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "sales1",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User sales1: 6 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 6,
+        "delete_count": 6,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/profile",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:25+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/orders",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:30+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/api/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:39+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/dashboard",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:24+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/dashboard",
+            "status": 200,
+            "timestamp": "2025-12-09 11:51:15+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "sales1",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "data_exfiltration",
+      "subject": "lehong",
+      "severity": "WARNING",
+      "score": 7.0,
+      "text": "User lehong: Downloaded 1 large files (0.1MB) - /export/leads.csv",
+      "evidence": {
+        "exfiltration_files_count": 1,
+        "exfiltration_total_mb": 0.08,
+        "exfiltration_files": [
+          {
+            "path": "/export/leads.csv",
+            "size_mb": 0.08,
+            "timestamp": "2025-12-09 11:50:19+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "lehong",
+        "behavior": {
+          "type": "data_exfiltration"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "lehong",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User lehong: 2 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 2,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:46:07+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/orders",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:17+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "lehong",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "huyle",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User huyle: 3 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 3,
+        "delete_count": 3,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:45:10+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/logout",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:45+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:52:34+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "huyle",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "khanhng",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User khanhng: 5 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 5,
+        "delete_count": 5,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/ci/builds/123",
+            "status": 200,
+            "timestamp": "2025-12-09 11:45:13+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/git/repo1/info",
+            "status": 200,
+            "timestamp": "2025-12-09 11:46:31+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:46:33+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/logout",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:53+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/api/v1/jobs",
+            "status": 200,
+            "timestamp": "2025-12-09 11:52:15+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "khanhng",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "tnghia",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User tnghia: 4 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 4,
+        "delete_count": 4,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:46:59+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:14+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/api/v1/jobs",
+            "status": 200,
+            "timestamp": "2025-12-09 11:52:23+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/git/repo1/info",
+            "status": 200,
+            "timestamp": "2025-12-09 11:52:48+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "tnghia",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "huydev",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User huydev: 3 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 3,
+        "delete_count": 3,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/git/repo1/info",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:01+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/ci/builds/123",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:00+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/ci/builds/123",
+            "status": 200,
+            "timestamp": "2025-12-09 11:52:30+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "huydev",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "minhtq",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User minhtq: 4 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 4,
+        "delete_count": 4,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/git/repo1/info",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:15+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/git/repo1/info",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:13+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/login",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:06+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/logout",
+            "status": 200,
+            "timestamp": "2025-12-09 11:52:17+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "minhtq",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "tranbinh",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User tranbinh: 3 DELETE requests + 1 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 4,
+        "delete_count": 3,
+        "error_count": 1,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:47:37+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:33+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/reports/q3",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:30+00:00"
+          },
+          {
+            "type": "500_ERROR",
+            "path": "/orders",
+            "method": "POST",
+            "timestamp": "2025-12-09 11:48:51+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "tranbinh",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "sales2",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User sales2: 2 DELETE requests",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 2,
+        "error_count": 0,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/dashboard",
+            "status": 200,
+            "timestamp": "2025-12-09 11:49:00+00:00"
+          },
+          {
+            "type": "DELETE",
+            "path": "/orders",
+            "status": 200,
+            "timestamp": "2025-12-09 11:50:25+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "sales2",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    },
+    {
+      "type": "suspicious_operations",
+      "subject": "quangdev",
+      "severity": "WARNING",
+      "score": 7.5,
+      "text": "User quangdev: 1 DELETE requests + 1 500 errors",
+      "evidence": {
+        "suspicious_operations_count": 2,
+        "delete_count": 1,
+        "error_count": 1,
+        "suspicious_operations": [
+          {
+            "type": "DELETE",
+            "path": "/api/v1/jobs",
+            "status": 302,
+            "timestamp": "2025-12-09 11:50:11+00:00"
+          },
+          {
+            "type": "500_ERROR",
+            "path": "/logout",
+            "method": "POST",
+            "timestamp": "2025-12-09 11:49:18+00:00"
+          }
+        ]
+      },
+      "prompt_ctx": {
+        "user": "quangdev",
+        "behavior": {
+          "type": "suspicious_operations"
+        }
+      }
+    }
+  ]
+}

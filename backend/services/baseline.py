@@ -44,7 +44,6 @@ def _daily_user_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate per-user-per-day features robustly (presence-optional columns).
     Trả về DataFrame index (username, date) với numeric features.
-    NOW INCLUDES: data access patterns (query count, suspicious operations)
     """
     df = df.copy()
     # Chuẩn hóa user
@@ -79,18 +78,6 @@ def _daily_user_features(df: pd.DataFrame) -> pd.DataFrame:
     def _count_http_5xx(g: pd.DataFrame) -> int:
         hs = pd.to_numeric(g.get("http_status", pd.Series(index=g.index)), errors="coerce")
         return int(hs.between(500, 599).sum())
-    
-    def _count_db_queries(g: pd.DataFrame) -> int:
-        """Count SELECT/INSERT/UPDATE/DELETE (normal queries, NOT tools like pg_dump)"""
-        msg = g.get("message", pd.Series(index=g.index)).astype(str).str.lower()
-        # Exclude pg_dump/mysqldump to avoid double-counting
-        not_suspicious = ~msg.str.contains(r"(pg_dump|mysqldump)", case=False, regex=True, na=False)
-        return int(msg[not_suspicious].str.contains(r"\b(SELECT|INSERT|UPDATE|DELETE|export|backup)\b", case=False, regex=True, na=False).sum())
-    
-    def _count_suspicious_ops(g: pd.DataFrame) -> int:
-        """Count ONLY suspicious data operations (pg_dump, mysqldump, LIMIT 1000) - NOT included in db_queries"""
-        msg = g.get("message", pd.Series(index=g.index)).astype(str).str.lower()
-        return int(msg.str.contains(r"(pg_dump|mysqldump|limit.*1000)", case=False, regex=True, na=False).sum())
 
     feat = pd.DataFrame({
         "events": grp.size(),
@@ -99,8 +86,6 @@ def _daily_user_features(df: pd.DataFrame) -> pd.DataFrame:
         "ssh_events": grp.apply(_count_ssh_events),
         "http_4xx": grp.apply(_count_http_4xx),
         "http_5xx": grp.apply(_count_http_5xx),
-        "db_queries": grp.apply(_count_db_queries),
-        "suspicious_ops": grp.apply(_count_suspicious_ops),
     })
 
     for c in feat.columns:
@@ -346,14 +331,20 @@ def build_global_baseline(df: pd.DataFrame) -> Dict[str, float]:
     else:
         up_per_hour = bytes_per_hour  # fallback: dùng tổng bytes như một xấp xỉ
 
+    # Helper function to safely convert values to float, handling NaN/None
+    def _safe_float(val) -> float:
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return 0.0
+        return float(val)
+
     return {
-        "events_per_hour_mean": float(events_per_hour.mean()) if len(events_per_hour) else 0.0,
-        "events_per_hour_std": float(events_per_hour.std()) if len(events_per_hour) else 0.0,
-        "bytes_per_hour_mean": float(bytes_per_hour.mean()) if len(bytes_per_hour) else 0.0,
-        "bytes_per_hour_std": float(bytes_per_hour.std()) if len(bytes_per_hour) else 0.0,
-        "upload_bytes_per_hour_p95": float(up_per_hour.quantile(0.95)) if len(up_per_hour) else 0.0,
+        "events_per_hour_mean": _safe_float(events_per_hour.mean()) if len(events_per_hour) else 0.0,
+        "events_per_hour_std": _safe_float(events_per_hour.std()) if len(events_per_hour) else 0.0,
+        "bytes_per_hour_mean": _safe_float(bytes_per_hour.mean()) if len(bytes_per_hour) else 0.0,
+        "bytes_per_hour_std": _safe_float(bytes_per_hour.std()) if len(bytes_per_hour) else 0.0,
+        "upload_bytes_per_hour_p95": _safe_float(up_per_hour.quantile(0.95)) if len(up_per_hour) else 0.0,
         "max_events_per_hour": int(events_per_hour.max()) if len(events_per_hour) else 0,
-        "max_bytes_per_hour": float(bytes_per_hour.max()) if len(bytes_per_hour) else 0.0,
+        "max_bytes_per_hour": _safe_float(bytes_per_hour.max()) if len(bytes_per_hour) else 0.0,
     }
 
 

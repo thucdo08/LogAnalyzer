@@ -1,0 +1,534 @@
+{
+  "generated_at": "2025-12-09T11:51:51.906563+00:00",
+  "summary": {
+    "total_alerts": 19,
+    "severity_breakdown": {
+      "WARNING": 9,
+      "CRITICAL": 10
+    },
+    "type_breakdown": {
+      "user_unique_src_ips_spike": 2,
+      "blocked_actions_spike": 1,
+      "off_hours_access": 12,
+      "firewall_deny_burst": 1,
+      "firewall_exfiltration": 1,
+      "firewall_policy_evasion": 1,
+      "firewall_rogue_internal": 1
+    },
+    "top_subjects": [
+      "itops",
+      "quangdev",
+      "tnghia",
+      "backup",
+      "svc_monitor",
+      "Firewall Security",
+      "khanhng",
+      "huyle",
+      "admin2",
+      "minhtq"
+    ]
+  },
+  "alerts": [
+    {
+      "type": "user_unique_src_ips_spike",
+      "subject": "admin1",
+      "severity": "WARNING",
+      "score": 3.7142857142857144,
+      "text": "Số IP nguồn khác nhau của user admin1 tăng đột biến: 13 so với trung bình 7±0.",
+      "evidence": {
+        "current": 13,
+        "mean": 7.0,
+        "std": 0.0
+      },
+      "prompt_ctx": {
+        "user": "admin1",
+        "group": null,
+        "behavior": {
+          "type": "unique_src_ips",
+          "value": 13
+        },
+        "time": null,
+        "baseline": {
+          "mean": 7.0,
+          "std": 0.0
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "user_unique_src_ips_spike",
+      "subject": "netops",
+      "severity": "WARNING",
+      "score": 3.7142857142857144,
+      "text": "Số IP nguồn khác nhau của user netops tăng đột biến: 13 so với trung bình 7±0.",
+      "evidence": {
+        "current": 13,
+        "mean": 7.0,
+        "std": 0.0
+      },
+      "prompt_ctx": {
+        "user": "netops",
+        "group": null,
+        "behavior": {
+          "type": "unique_src_ips",
+          "value": 13
+        },
+        "time": null,
+        "baseline": {
+          "mean": 7.0,
+          "std": 0.0
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "blocked_actions_spike",
+      "subject": "10.97.208.176",
+      "severity": "WARNING",
+      "score": 5.454545454545454,
+      "text": "Phát hiện 6/11 hành động bị chặn (54.5%) từ source_ip=10.97.208.176. Chi tiết: User: quangdev | Host: fw-edge01 | Target: 10.10.10.20 Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
+      "evidence": {
+        "blocked_count": 6,
+        "total_count": 11,
+        "ratio": 0.5454545454545454,
+        "source": "10.97.208.176",
+        "context": "User: quangdev | Host: fw-edge01 | Target: 10.10.10.20"
+      },
+      "prompt_ctx": {
+        "user": "quangdev",
+        "group": null,
+        "behavior": {
+          "type": "blocked_actions_spike",
+          "ratio": 0.5454545454545454,
+          "count": 6,
+          "source": "10.97.208.176"
+        },
+        "time": null,
+        "baseline": {
+          "expected_ratio": 0.2
+        },
+        "extras": {
+          "reason": "High ratio of blocked/denied actions from 10.97.208.176"
+        }
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "itops",
+      "severity": "CRITICAL",
+      "score": 5.4,
+      "text": "User itops truy cập ngoài giờ làm việc (14 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 14
+      },
+      "prompt_ctx": {
+        "user": "itops",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 14
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "quangdev",
+      "severity": "WARNING",
+      "score": 4.7,
+      "text": "User quangdev truy cập ngoài giờ làm việc (7 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 7
+      },
+      "prompt_ctx": {
+        "user": "quangdev",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 7
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "admin1",
+      "severity": "CRITICAL",
+      "score": 5.2,
+      "text": "User admin1 truy cập ngoài giờ làm việc (12 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 12
+      },
+      "prompt_ctx": {
+        "user": "admin1",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 12
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "tnghia",
+      "severity": "CRITICAL",
+      "score": 5.3,
+      "text": "User tnghia truy cập ngoài giờ làm việc (13 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 13
+      },
+      "prompt_ctx": {
+        "user": "tnghia",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 13
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "minhtq",
+      "severity": "CRITICAL",
+      "score": 5.1,
+      "text": "User minhtq truy cập ngoài giờ làm việc (11 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 11
+      },
+      "prompt_ctx": {
+        "user": "minhtq",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 11
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "khanhng",
+      "severity": "WARNING",
+      "score": 4.6,
+      "text": "User khanhng truy cập ngoài giờ làm việc (6 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 6
+      },
+      "prompt_ctx": {
+        "user": "khanhng",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 6
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "netops",
+      "severity": "WARNING",
+      "score": 4.7,
+      "text": "User netops truy cập ngoài giờ làm việc (7 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 7
+      },
+      "prompt_ctx": {
+        "user": "netops",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 7
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "huydev",
+      "severity": "CRITICAL",
+      "score": 5.3,
+      "text": "User huydev truy cập ngoài giờ làm việc (13 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 13
+      },
+      "prompt_ctx": {
+        "user": "huydev",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 13
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "backup",
+      "severity": "CRITICAL",
+      "score": 5.1,
+      "text": "User backup truy cập ngoài giờ làm việc (11 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 11
+      },
+      "prompt_ctx": {
+        "user": "backup",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 11
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "huyle",
+      "severity": "WARNING",
+      "score": 4.8,
+      "text": "User huyle truy cập ngoài giờ làm việc (8 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 8
+      },
+      "prompt_ctx": {
+        "user": "huyle",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 8
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "admin2",
+      "severity": "CRITICAL",
+      "score": 5.2,
+      "text": "User admin2 truy cập ngoài giờ làm việc (12 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 12
+      },
+      "prompt_ctx": {
+        "user": "admin2",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 12
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "off_hours_access",
+      "subject": "svc_monitor",
+      "severity": "WARNING",
+      "score": 4.6,
+      "text": "User svc_monitor truy cập ngoài giờ làm việc (6 sự kiện vào lúc [22]h).",
+      "evidence": {
+        "hours": [
+          22
+        ],
+        "events": 6
+      },
+      "prompt_ctx": {
+        "user": "svc_monitor",
+        "group": null,
+        "behavior": {
+          "type": "off_hours_access",
+          "hours": [
+            22
+          ],
+          "events": 6
+        },
+        "time": null,
+        "baseline": {
+          "working_hours": "6h-22h"
+        },
+        "extras": {}
+      }
+    },
+    {
+      "type": "firewall_deny_burst",
+      "subject": "Firewall Security",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "text": "Firewall DENY/BLOCK burst detected: 120 blocked connections from 20 source IPs to 1 destinations. Top sources: ['10.233.64.205', '10.152.112.176', '10.102.112.36']",
+      "evidence": {
+        "deny_count": 120,
+        "unique_sources": 20,
+        "unique_destinations": 1,
+        "top_source_ips": [
+          "10.233.64.205",
+          "10.152.112.176",
+          "10.102.112.36"
+        ]
+      },
+      "prompt_ctx": {
+        "behavior": {
+          "type": "firewall_deny_burst",
+          "count": 120
+        }
+      }
+    },
+    {
+      "type": "firewall_exfiltration",
+      "subject": "Firewall Security",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "text": "Data exfiltration suspected: 76 high-volume transfers (16MB) to 6 destinations",
+      "evidence": {
+        "high_traffic_count": 76,
+        "total_mb": 16
+      },
+      "prompt_ctx": {
+        "behavior": {
+          "type": "firewall_exfiltration"
+        }
+      }
+    },
+    {
+      "type": "firewall_policy_evasion",
+      "subject": "Firewall Security",
+      "severity": "WARNING",
+      "score": 6.5,
+      "text": "Policy evasion detected: 474 unusual protocol/port combinations",
+      "evidence": {
+        "suspicious_count": 474
+      },
+      "prompt_ctx": {
+        "behavior": {
+          "type": "firewall_policy_evasion"
+        }
+      }
+    },
+    {
+      "type": "firewall_rogue_internal",
+      "subject": "Firewall Security",
+      "severity": "CRITICAL",
+      "score": 8.0,
+      "text": "Rogue internal activity: 232 suspicious admin destination accesses by 12 users",
+      "evidence": {
+        "admin_accesses": 232,
+        "unique_users": 12
+      },
+      "prompt_ctx": {
+        "behavior": {
+          "type": "firewall_rogue_internal"
+        }
+      }
+    }
+  ]
+}

@@ -130,3 +130,4 @@ def parse_syslog_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
     
     return parsed_df
 
+
