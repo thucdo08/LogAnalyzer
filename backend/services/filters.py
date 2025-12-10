@@ -10,9 +10,9 @@ NOISE_PATTERNS = [
     r"session closed for user",
     r"connection from",
 
-    # Linux/SSHD common benign events
-    r"accepted publickey for",
-    r"accepted password for",
+    # SSH patterns - REMOVED FROM NOISE (critical for lateral movement detection!)
+    # r"accepted publickey for",  # REMOVED - SSH logins are security events
+    # r"accepted password for",   # REMOVED - SSH logins are security events
     r"disconnected from",
     r"received disconnect",
     r"pam_unix.*session (opened|closed)",
@@ -23,8 +23,8 @@ NOISE_PATTERNS = [
     # Cron routine commands
     r"cron\[\d+\]: \(.*\) CMD \(.*\)",
 
-    # OpenSSH variants without pid and banner
-    r"sshd: Accepted (publickey|password) for ",
+    # OpenSSH variants - ONLY disconnect/close patterns, NOT login patterns
+    # r"sshd: Accepted (publickey|password) for ",  # REMOVED - critical ssh logins
     r"sshd: Disconnected from( user)? ",
     r"sshd: Received disconnect from ",
     r"sshd: Connection closed by ",
@@ -130,12 +130,11 @@ def _match_noise_fields(row: pd.Series) -> str | None:
 
         # 2.6 Syslog (Linux/Unix system logs) - Enhanced for security
         if program in ("sshd", "sudo", "cron") or ("facility" in row.index):
-            # SSH patterns - only collapse successful, normal logins
+            # SSH patterns - NEVER collapse SSH logins (critical for lateral movement detection)
             if "sshd" in program.lower():
-                if action == "login" and status == "success":
-                    # Only collapse normal SSH logins from known patterns
-                    if "Accepted" in message:
-                        return "ssh_login_success"
+                # NEVER collapse successful logins - they are security events for lateral movement
+                if "Accepted" in message:
+                    return None  # CHANGED: Preserve SSH logins for lateral movement detection
                 # Never collapse failed logins - these are security events
                 if status == "failed":
                     return None
@@ -206,10 +205,10 @@ def _match_noise_fields(row: pd.Series) -> str | None:
             except Exception:
                 pass
 
-        # 2.3 Linux – ssh success common
+        # 2.3 Linux – ssh success - CHANGED: preserve for lateral movement detection
         if program.startswith("sshd") or "ssh" in program:
-            if action == "login" and status == "success":
-                return "ssh_login_success"
+            # REMOVED: No longer collapse SSH logins - they are security events
+            pass  # SSH logins now preserved for lateral movement detection
 
         return None
     except Exception:
@@ -339,7 +338,7 @@ def _match_noise(message: str) -> str | None:
             # --- OpenSSH variants/banner ---
             if msg_lower.startswith("sshd: "):
                 if "accepted" in msg_lower:
-                    return "ssh_login_success"
+                    return None  # CHANGED: Preserve SSH logins for lateral movement detection
                 if "disconnected from" in msg_lower:
                     return "ssh_disconnected"
                 if "received disconnect" in msg_lower:

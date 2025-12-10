@@ -1382,11 +1382,14 @@ def _detect_network_link_flap(df: pd.DataFrame) -> List[Dict[str, Any]]:
             
             alert_text = f"Network link flap detected: eth0 Link Up on {unique_servers} servers ({total_events} events)"
             
+            # Calculate score first, then derive severity from score
+            link_flap_score = min(8.0 + (unique_servers / 10), 10.0)
+            
             alerts.append({
                 "type": "network_link_flap",
                 "subject": "Network Infrastructure",
-                "severity": "CRITICAL" if unique_servers >= 15 else "WARNING",
-                "score": min(8.0 + (unique_servers / 10), 10.0),
+                "severity": scoring.get_severity(link_flap_score),  # Use unified scoring
+                "score": link_flap_score,
                 "text": alert_text,
                 "evidence": {"unique_servers": int(unique_servers), "total_events": int(total_events), "affected_servers": [str(s) for s in affected_servers]},
                 "prompt_ctx": {"behavior": {"type": "network_link_flap"}},
@@ -1417,11 +1420,15 @@ def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
             if execution_count >= 10 and unique_users >= 3:
                 host = group["host"].iloc[0] if "host" in group.columns else "unknown"
                 alert_text = f"Cron job overlap: script '{script}' executed {execution_count} times by {unique_users} users"
+                
+                # Calculate score first, then derive severity from score
+                cron_score = min(5.0 + (execution_count / 10), 8.0)
+                
                 alerts.append({
                     "type": "cron_job_overlap",
                     "subject": str(host),
-                    "severity": "WARNING",
-                    "score": min(5.0 + (execution_count / 10), 8.0),
+                    "severity": scoring.get_severity(cron_score),  # Use unified scoring
+                    "score": cron_score,
                     "text": alert_text,
                     "evidence": {"script": str(script), "execution_count": int(execution_count), "unique_users": int(unique_users), "users": [str(u) for u in users_list]},
                     "prompt_ctx": {"behavior": {"type": "cron_job_overlap"}},
@@ -1431,36 +1438,217 @@ def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
         print(f"[DEBUG] Cron overlap error: {e}", file=sys.stderr)
     return alerts
 
-def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect SSH successful login bursts (potential lateral movement)."""
+def _detect_privilege_escalation(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect privilege escalation - USER-CENTRIC detection.
+    
+    Detects non-admin users reloading/restarting system services (nginx, apache, mysql, etc.)
+    which indicates potential privilege abuse or account compromise.
+    """
     alerts = []
-    if "message" not in df.columns or "program" not in df.columns:
+    if "message" not in df.columns:
         return alerts
+    
     try:
-        ssh_logs = df[df["program"].astype(str).str.contains(r"sshd\[", case=False, na=False)].copy()
-        if len(ssh_logs) == 0:
-            return alerts
-        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted publickey", case=False, na=False)]
-        if len(successful_logins) == 0:
-            return alerts
-        login_count = len(successful_logins)
-        if login_count >= 30:
-            unique_hosts = successful_logins["host"].nunique() if "host" in successful_logins.columns else 0
-            affected_hosts = successful_logins["host"].unique().tolist()[:5] if "host" in successful_logins.columns else []
-            alert_text = f"SSH login burst: {login_count} successful logins to {unique_hosts} servers"
-            subject = f"CI/CD Infrastructure ({', '.join([str(h) for h in affected_hosts[:3]])})"
-            alerts.append({
-                "type": "ssh_login_burst",
-                "subject": subject,
-                "severity": "WARNING",
-                "score": min(5.0 + (login_count / 30), 8.0),
-                "text": alert_text,
-                "evidence": {"login_count": int(login_count), "unique_hosts": int(unique_hosts), "affected_hosts": [str(h) for h in affected_hosts]},
-                "prompt_ctx": {"behavior": {"type": "ssh_login_burst"}},
-            })
+        # Define ADMIN users who ARE allowed to reload services (whitelist approach)
+        # Anyone NOT in this list who reloads services is suspicious
+        admin_users = ["root", "admin", "sysadmin", "operator", "ops", "www-data", "nginx", "apache", "mysql", "postgres"]
+        
+        # Track detected users to avoid duplicates for same user/host combo
+        detected_privesc = set()
+        
+        for _, row in df.iterrows():
+            msg = str(row.get("message", ""))
+            host = str(row.get("host", "unknown"))
+            
+            # Check for service reload pattern with "requested by" user
+            requested_match = re.search(r"Reload(ing)?\s+(\w+)\s+server.*requested\s+by\s+(\w+)", msg, re.IGNORECASE)
+            if requested_match:
+                service_name = requested_match.group(2)
+                username = requested_match.group(3)
+                
+                # Unique key to avoid duplicate alerts for same user+host+service
+                alert_key = (username, host, service_name)
+                if alert_key in detected_privesc:
+                    continue
+                detected_privesc.add(alert_key)
+                
+                # Check if user is NOT an admin (whitelist approach)
+                is_non_admin = username.lower() not in admin_users
+                
+                if is_non_admin:
+                    # This is suspicious - non-admin reloading system service
+                    priv_score = 8.5  # High score - privilege escalation
+                    
+                    alerts.append({
+                        "type": "privilege_escalation",
+                        "subject": username,  # USER-CENTRIC: subject is the USER
+                        "severity": scoring.get_severity(priv_score),
+                        "score": priv_score,
+                        "text": f"Privilege escalation detected: Non-admin user '{username}' reloaded {service_name} server on {host}.",
+                        "evidence": {
+                            "username": username,
+                            "service": service_name,
+                            "action": "reload",
+                            "host": host,
+                            "message": msg[:200],
+                        },
+                        "prompt_ctx": {
+                            "user": username,
+                            "group": None,
+                            "behavior": {"type": "privilege_escalation", "service": service_name, "action": "reload"},
+                            "time": None,
+                            "baseline": {"expected_role": "admin"},
+                            "extras": {"reason": "Non-admin users should not have access to reload system services"},
+                        },
+                    })
+            
+            # Also check for sudo/su commands
+            sudo_match = re.search(r"sudo:\s+(\w+)\s*:", msg, re.IGNORECASE)
+            if sudo_match:
+                username = sudo_match.group(1)
+                is_non_admin = any(pattern in username.lower() for pattern in non_admin_patterns)
+                
+                if is_non_admin:
+                    # Check for sensitive commands
+                    if re.search(r"(systemctl|service|reboot|shutdown|passwd|useradd|userdel|chmod|chown)", msg, re.IGNORECASE):
+                        priv_score = 9.0  # Very high - sudo with sensitive commands
+                        
+                        alerts.append({
+                            "type": "privilege_escalation",
+                            "subject": username,
+                            "severity": scoring.get_severity(priv_score),
+                            "score": priv_score,
+                            "text": f"Privilege escalation detected: Non-admin user '{username}' used sudo for sensitive operations.",
+                            "evidence": {
+                                "username": username,
+                                "action": "sudo_sensitive_command",
+                                "host": host,
+                                "message": msg[:200],
+                            },
+                            "prompt_ctx": {
+                                "user": username,
+                                "group": None,
+                                "behavior": {"type": "privilege_escalation", "action": "sudo"},
+                                "time": None,
+                                "baseline": {"expected_role": "admin"},
+                                "extras": {"reason": "Non-admin users using sudo for sensitive commands is highly suspicious"},
+                            },
+                        })
     except Exception as e:
         import sys
-        print(f"[DEBUG] SSH burst error: {e}", file=sys.stderr)
+        print(f"[DEBUG] Privilege escalation error: {e}", file=sys.stderr)
+    return alerts
+
+def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect SSH lateral movement - USER-CENTRIC detection.
+    
+    Creates per-user alerts for SSH logins from multiple IPs, indicating potential
+    lateral movement or account compromise.
+    """
+    alerts = []
+    if "message" not in df.columns:
+        return alerts
+    try:
+        import sys
+        
+        # Find SSH daemon logs - check both program column AND message content
+        ssh_logs = pd.DataFrame()
+        
+        if "program" in df.columns:
+            program_ssh = df[df["program"].astype(str).str.contains(r"sshd", case=False, na=False)].copy()
+            ssh_logs = pd.concat([ssh_logs, program_ssh], ignore_index=True)
+        
+        # Fallback: Check message directly for SSH patterns
+        message_ssh = df[df["message"].astype(str).str.contains(r"(sshd|Accepted\s+(publickey|password)\s+for)", case=False, regex=True, na=False)].copy()
+        ssh_logs = pd.concat([ssh_logs, message_ssh], ignore_index=True)
+        
+        # Remove duplicates
+        if not ssh_logs.empty:
+            ssh_logs = ssh_logs.drop_duplicates()
+        
+        if len(ssh_logs) == 0:
+            print(f"[DEBUG] SSH detection: No SSH logs found in {len(df)} rows", file=sys.stderr)
+            return alerts
+        
+        print(f"[DEBUG] SSH detection: Found {len(ssh_logs)} SSH log entries", file=sys.stderr)
+        
+        # Filter for successful logins (lateral movement indicator)
+        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted\s+(publickey|password)", case=False, regex=True, na=False)].copy()
+        if len(successful_logins) == 0:
+            print(f"[DEBUG] SSH detection: No 'Accepted publickey/password' found", file=sys.stderr)
+            return alerts
+        
+        print(f"[DEBUG] SSH detection: Found {len(successful_logins)} successful SSH logins", file=sys.stderr)
+        
+        # Extract username and source IP from message
+        # Pattern: "Accepted publickey for huydev from 10.141.10.67 port 12345"
+        successful_logins["ssh_user"] = successful_logins["message"].str.extract(r"Accepted\s+\S+\s+for\s+(\S+)\s+from", flags=re.IGNORECASE)[0]
+        successful_logins["ssh_source_ip"] = successful_logins["message"].str.extract(r"from\s+([0-9\.]+)\s+port", flags=re.IGNORECASE)[0]
+        
+        # Drop rows without extracted data
+        successful_logins = successful_logins[successful_logins["ssh_user"].notna() & successful_logins["ssh_source_ip"].notna()]
+        
+        if len(successful_logins) == 0:
+            print(f"[DEBUG] SSH detection: Failed to extract user/IP from messages", file=sys.stderr)
+            return alerts
+        
+        print(f"[DEBUG] SSH detection: Extracted {len(successful_logins)} logins with user+IP, users: {successful_logins['ssh_user'].unique().tolist()}", file=sys.stderr)
+        
+        # GROUP BY USER - Create per-user alerts (USER-CENTRIC approach)
+        for username, user_group in successful_logins.groupby("ssh_user"):
+            username = str(username).strip()
+            if not username or username in ["(unknown)", "nan", ""]:
+                continue
+            
+            login_count = len(user_group)
+            unique_source_ips = user_group["ssh_source_ip"].nunique()
+            source_ips_list = user_group["ssh_source_ip"].unique().tolist()[:10]
+            unique_hosts = user_group["host"].nunique() if "host" in user_group.columns else 0
+            target_hosts = user_group["host"].unique().tolist()[:5] if "host" in user_group.columns else []
+            
+            # ALERT ON ANY SSH LOGIN: Even 1 login can indicate lateral movement in attack scenarios
+            # Score increases with more logins/IPs
+            if login_count >= 1:
+                # Calculate score based on login patterns
+                # High score for many source IPs (potential botnet/compromised machines)
+                # Medium score for high login count from few IPs
+                lateral_score = 5.0
+                if unique_source_ips >= 5:
+                    lateral_score = 8.5  # Definitely suspicious - many source IPs
+                elif unique_source_ips >= 3:
+                    lateral_score = 7.0  # Suspicious
+                if login_count >= 10:
+                    lateral_score = min(lateral_score + 1.0, 10.0)
+                if unique_hosts >= 5:
+                    lateral_score = min(lateral_score + 1.0, 10.0)  # Targeting many hosts
+                
+                alerts.append({
+                    "type": "ssh_lateral_movement",
+                    "subject": username,  # USER-CENTRIC: subject is the USER
+                    "severity": scoring.get_severity(lateral_score),
+                    "score": lateral_score,
+                    "text": f"SSH lateral movement detected: User '{username}' logged in {login_count} times from {unique_source_ips} different source IPs to {unique_hosts} servers.",
+                    "evidence": {
+                        "username": username,
+                        "login_count": int(login_count),
+                        "unique_source_ips": int(unique_source_ips),
+                        "source_ips": source_ips_list,
+                        "target_hosts": target_hosts,
+                    },
+                    "prompt_ctx": {
+                        "user": username,
+                        "group": None,
+                        "behavior": {"type": "ssh_lateral_movement", "logins": login_count, "source_ips": unique_source_ips},
+                        "time": None,
+                        "baseline": {"expected_source_ips": 1},
+                        "extras": {"reason": "Multiple source IPs indicate lateral movement or compromised credentials"},
+                    },
+                })
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] SSH lateral movement error: {e}", file=sys.stderr)
     return alerts
 
 def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[str, Any]]:
@@ -2603,9 +2791,10 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
     apache_alerts = _detect_apache_anomalies(df)
     alerts.extend(apache_alerts)
     
-    # NEW: Network link flap detection (kernel Link Up events on multiple servers)
-    network_alerts = _detect_network_link_flap(df)
-    alerts.extend(network_alerts)
+    # DISABLED: Network link flap is infrastructure noise, not user behavior
+    # For UEBA (User Entity Behavior Analytics), focus on user actions only
+    # network_alerts = _detect_network_link_flap(df)
+    # alerts.extend(network_alerts)
     
     # NEW: Cron job overlap detection (same script running multiple times)
     cron_alerts = _detect_cron_job_overlap(df)
@@ -2614,6 +2803,10 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
     # NEW: SSH successful login burst detection (potential lateral movement)
     ssh_burst_alerts = _detect_ssh_login_burst(df)
     alerts.extend(ssh_burst_alerts)
+    
+    # NEW: Privilege escalation detection (non-admin users running privileged operations)
+    priv_esc_alerts = _detect_privilege_escalation(df)
+    alerts.extend(priv_esc_alerts)
 
     return alerts
 
