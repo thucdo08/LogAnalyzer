@@ -104,24 +104,50 @@ export default function App() {
     return Array.from(types);
   }, [anomalySubjects]);
 
-  // áp dụng filter theo type + risk level
-  const filteredAnomalySubjects = useMemo(() => {
-    let subjects = anomalySubjects;
-    if (anomalyFilterType) {
-      subjects = subjects.filter((subject) => subject.alertTypes.includes(anomalyFilterType));
-    }
-    if (anomalyFilterLevel) {
-      subjects = subjects.filter((subject) => subject.ai_analysis?.risk_level === anomalyFilterLevel);
-    }
-    return subjects;
-  }, [anomalySubjects, anomalyFilterType, anomalyFilterLevel]);
-
-  const totalAnalyzedSubjects = anomalySubjects.length;
-  const totalAnalyzedAlerts = anomalyAnalyzed?.length || 0;
-
   const [selectedLevels, setSelectedLevels] = useState(
     new Set(["CRITICAL", "WARNING", "INFO"])
   );
+
+  // áp dụng filter theo type + risk level + severity (CRITICAL/WARNING/INFO) + query search
+  const filteredAnomalySubjects = useMemo(() => {
+    let subjects = anomalySubjects;
+    // Lọc theo alert type dropdown
+    if (anomalyFilterType) {
+      subjects = subjects.filter((subject) => subject.alertTypes.includes(anomalyFilterType));
+    }
+    // Lọc theo risk level dropdown
+    if (anomalyFilterLevel) {
+      subjects = subjects.filter((subject) => subject.ai_analysis?.risk_level === anomalyFilterLevel);
+    }
+    // Lọc theo severity checkbox (CRITICAL/WARNING/INFO)
+    subjects = subjects.filter((subject) => {
+      const sev = (subject.severity || "INFO").toUpperCase();
+      return selectedLevels.has(sev);
+    });
+    // Lọc theo từ khóa tìm kiếm (query)
+    const q = (query || "").toLowerCase().trim();
+    if (q) {
+      subjects = subjects.filter((subject) => {
+        // Tìm trong subject name
+        if (subject.subject?.toLowerCase().includes(q)) return true;
+        // Tìm trong alert types
+        if (subject.alertTypes.some((t) => t.toLowerCase().includes(q))) return true;
+        // Tìm trong AI analysis summary
+        if (subject.ai_analysis?.summary?.toLowerCase().includes(q)) return true;
+        // Tìm trong risks
+        if (subject.ai_analysis?.risks?.some((r) => r.toLowerCase().includes(q))) return true;
+        // Tìm trong actions
+        if (subject.ai_analysis?.actions?.some((a) => a.toLowerCase().includes(q))) return true;
+        // Tìm trong alert text
+        if (subject.alerts?.some((alert) => alert.text?.toLowerCase().includes(q))) return true;
+        return false;
+      });
+    }
+    return subjects;
+  }, [anomalySubjects, anomalyFilterType, anomalyFilterLevel, selectedLevels, query]);
+
+  const totalAnalyzedSubjects = anomalySubjects.length;
+  const totalAnalyzedAlerts = anomalyAnalyzed?.length || 0;
 
   // lọc theo thời gian
   const [fromTs, setFromTs] = useState("");
@@ -326,15 +352,52 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 p-6">
-      <div className="max-w-6xl mx-auto bg-white rounded-xl shadow-lg p-6">
-        <h1 className="text-2xl font-bold text-slate-800">📊 Log Analyzer</h1>
-        <p className="text-slate-500 mt-1">
-          Tải file log (.csv, .json, .ndjson, .txt, .log) → chuẩn hoá → lọc nhiễu → enrich → AI → hậu xử lý.
-        </p>
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 p-6">
+      <div className="max-w-6xl mx-auto bg-white rounded-2xl shadow-xl p-8 border border-slate-100">
+        {/* Header Section */}
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg mb-4">
+            <span className="text-3xl">🔍</span>
+          </div>
+          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+            Log Analyzer Pro
+          </h1>
+          <p className="text-slate-500 mt-2 text-lg">
+            Nền tảng phân tích log thông minh với AI
+          </p>
+        </div>
+
+        {/* Feature Badges */}
+        <div className="flex flex-wrap justify-center gap-2 mb-6">
+          <span className="px-3 py-1.5 rounded-full bg-blue-50 text-blue-700 text-xs font-medium border border-blue-100">
+            🔄 Chuẩn hóa tự động
+          </span>
+          <span className="px-3 py-1.5 rounded-full bg-emerald-50 text-emerald-700 text-xs font-medium border border-emerald-100">
+            🧹 Lọc nhiễu thông minh
+          </span>
+          <span className="px-3 py-1.5 rounded-full bg-purple-50 text-purple-700 text-xs font-medium border border-purple-100">
+            🤖 Phân tích AI
+          </span>
+          <span className="px-3 py-1.5 rounded-full bg-orange-50 text-orange-700 text-xs font-medium border border-orange-100">
+            🚨 Phát hiện bất thường
+          </span>
+          <span className="px-3 py-1.5 rounded-full bg-rose-50 text-rose-700 text-xs font-medium border border-rose-100">
+            📊 Đánh giá rủi ro
+          </span>
+        </div>
+
+        {/* Supported Formats */}
+        <div className="flex justify-center gap-1.5 mb-6">
+          <span className="text-xs text-slate-400">Hỗ trợ:</span>
+          {[".csv", ".json", ".ndjson", ".txt", ".log"].map((ext) => (
+            <span key={ext} className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs font-mono">
+              {ext}
+            </span>
+          ))}
+        </div>
 
         {/* Upload */}
-        <div className="mt-5 flex justify-center">
+        <div className="flex justify-center">
           <div className="w-full max-w-xl">
             <FileUpload
               name="file"
@@ -343,14 +406,18 @@ export default function App() {
               uploadHandler={uploadHandler}
               mode="advanced"
               chooseLabel="Chọn file"
-              uploadLabel="Tải lên & phân tích"
+              uploadLabel="🚀 Phân tích"
               cancelLabel="Hủy"
               emptyTemplate={
-                <div className="flex flex-col items-center justify-center text-gray-500 py-8">
-                  <i className="pi pi-cloud-upload text-4xl mb-3 text-blue-500"></i>
-                  <p>
-                    Kéo & thả file vào đây hoặc bấm{" "}
-                    <span className="font-semibold">Chọn file</span>.
+                <div className="flex flex-col items-center justify-center text-gray-500 py-10 border-2 border-dashed border-slate-200 rounded-xl hover:border-blue-300 transition-colors">
+                  <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center mb-4">
+                    <i className="pi pi-cloud-upload text-2xl text-blue-500"></i>
+                  </div>
+                  <p className="text-slate-600 font-medium">
+                    Kéo & thả file vào đây
+                  </p>
+                  <p className="text-slate-400 text-sm mt-1">
+                    hoặc bấm <span className="text-blue-600 font-semibold">Chọn file</span> để tải lên
                   </p>
                 </div>
               }
