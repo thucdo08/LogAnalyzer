@@ -1,6 +1,5 @@
 import os
 import json
-import re
 from typing import List, Dict, Any, Tuple
 
 import numpy as np
@@ -28,7 +27,8 @@ def _load_json_df(path: str) -> pd.DataFrame:
 
 def _load_baseline_tables(base_dir: str) -> Dict[str, Any]:
     """
-    Load previously trained baselines from config/baselines/*
+    Load previously trained baselines from file system (FALLBACK only).
+    MongoDB is now primary storage - this function is fallback if MongoDB unavailable.
     Returns dict with user_stats, device_stats, group_stats, global_stats.
     """
     out: Dict[str, Any] = {}
@@ -153,1288 +153,49 @@ def _resolve_unknown_user(df: pd.DataFrame, unknown_user: str) -> str:
     
     return unknown_user
 
-def _detect_dhcp_scope_conflicts(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """
-    Detect if same MAC address (device) gets IPs from different DHCP servers or subnets.
-    This indicates potential scope conflict or rogue DHCP server.
-    """
-    alerts = []
-    
-    if "mac_address" not in df.columns or "host" not in df.columns:
-        return alerts
-    
-    try:
-        # Group by MAC address (unique device identifier)
-        for mac, group in df[df["mac_address"].notna()].groupby("mac_address"):
-            group = group.copy()
-            
-            # Count unique DHCP servers and subnets
-            unique_servers = group["host"].nunique()
-            unique_subnets = set()
-            
-            # Extract subnet from IP address
-            for _, row in group.iterrows():
-                ip = row.get("ip_address")
-                if ip and isinstance(ip, str):
-                    try:
-                        subnet = ".".join(ip.split(".")[:3])  # First 3 octets
-                        unique_subnets.add(subnet)
-                    except Exception:
-                        pass
-            
-            # Multiple servers OR multiple subnets = scope conflict (suspicious!)
-            if unique_servers >= 2 or len(unique_subnets) >= 2:
-                # Get user associated with this MAC
-                users = group["username"].dropna().astype(str).unique()
-                user_str = users[0] if len(users) > 0 else f"Device-{mac[:8]}"
-                
-                servers_list = group["host"].unique().tolist()
-                subnets_list = sorted(list(unique_subnets))
-                
-                alert_text = f"Thiết bị MAC {mac} nhận IP từ {unique_servers} DHCP servers khác nhau ({', '.join(servers_list)}) trong {len(unique_subnets)} subnets ({', '.join(subnets_list)}). Điều này có thể chỉ ra xung đột phạm vi DHCP hoặc máy chủ rogue."
-                
-                alerts.append({
-                    "type": "dhcp_scope_conflict",
-                    "subject": user_str,
-                    "severity": "CRITICAL",
-                    "score": 9.0,
-                    "text": alert_text,
-                    "evidence": {
-                        "mac_address": mac,
-                        "servers": servers_list,
-                        "subnets": subnets_list,
-                        "server_count": int(unique_servers),
-                        "subnet_count": int(len(unique_subnets)),
-                    },
-                    "prompt_ctx": {
-                        "user": user_str,
-                        "group": None,
-                        "behavior": {"type": "dhcp_scope_conflict", "servers": unique_servers, "subnets": len(unique_subnets)},
-                        "time": None,
-                        "baseline": {},
-                        "extras": {"reason": "MAC appears in multiple DHCP server responses"},
-                    },
-                })
-    except Exception as e:
-        pass  # Silently skip if error
-    
-    return alerts
-
-def _detect_dhcp_rogue_server(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """
-    Detect rapid DHCP ACKs which may indicate rogue DHCP server, NAK storm, or address exhaustion attack.
-    Normal DHCP: 1-2 ACKs per minute
-    Abnormal: >10 ACKs per minute
-    """
-    alerts = []
-    
-    if "action" not in df.columns or "timestamp" not in df.columns:
-        return alerts
-    
-    try:
-        # Filter to ACK events only
-        ack_df = df[df["action"] == "ack"].copy()
-        if len(ack_df) < 5:
-            return alerts
-        
-        # Ensure timestamp is datetime
-        ack_df["timestamp"] = pd.to_datetime(ack_df["timestamp"], errors="coerce", utc=True)
-        ack_df = ack_df.dropna(subset=["timestamp"])
-        
-        if len(ack_df) == 0:
-            return alerts
-        
-        # Count ACKs per minute
-        ack_df["minute"] = ack_df["timestamp"].dt.floor("1min")
-        ack_rates = ack_df.groupby("minute").size()
-        
-        # Check for abnormal rates (>10 per minute is suspicious)
-        suspicious_minutes = ack_rates[ack_rates > 10]
-        
-        if len(suspicious_minutes) > 0:
-            max_rate = int(ack_rates.max())
-            suspicious_count = len(suspicious_minutes)
-            
-            alert_text = f"Phát hiện tỷ lệ DHCP ACK bất thường: {max_rate} ACKs/phút (so với cơ sở 1-2/phút). Điều này có thể chỉ ra máy chủ rogue, cuộc tấn công NAK storm, hoặc cạn kiệt địa chỉ."
-            
-            alerts.append({
-                "type": "dhcp_rogue_server_indication",
-                "subject": "DHCP Network",
-                "severity": "CRITICAL",
-                "score": 8.5,
-                "text": alert_text,
-                "evidence": {
-                    "max_acks_per_minute": int(max_rate),
-                    "normal_baseline_min": 1,
-                    "normal_baseline_max": 2,
-                    "suspicious_minute_count": int(suspicious_count),
-                    "total_acks": int(len(ack_df)),
-                },
-                "prompt_ctx": {
-                    "user": None,
-                    "group": None,
-                    "behavior": {"type": "dhcp_abnormal_rate", "rate": max_rate},
-                    "time": None,
-                    "baseline": {"expected_acks_per_min": "1-2"},
-                    "extras": {"reason": "High frequency of DHCP ACK responses"},
-                },
-            })
-    except Exception as e:
-        pass  # Silently skip if error
-    
-    return alerts
-
-def _detect_dhcp_user_device_mismatch(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """
-    Detect if same device name is used by multiple users in short timeframe.
-    This may indicate device hijacking, unauthorized access, or testing.
-    """
-    alerts = []
-    
-    if "device" not in df.columns or "username" not in df.columns:
-        return alerts
-    
-    try:
-        # Group by device name (e.g., "khanhng-dev3")
-        for device, group in df[df["device"].notna()].groupby("device"):
-            group = group.copy()
-            
-            # Count unique users on this device
-            unique_users = group["username"].dropna().astype(str).unique()
-            
-            # If 3+ different users on same device = suspicious (device hijacking or shared testing)
-            if len(unique_users) >= 3:
-                time_span = group["timestamp"].max() - group["timestamp"].min()
-                time_minutes = int(time_span.total_seconds() / 60) if pd.notna(time_span) else 0
-                
-                users_list = sorted(list(unique_users))
-                
-                alert_text = f"Thiết bị '{device}' được sử dụng bởi {len(unique_users)} người dùng khác nhau trong {time_minutes} phút ({', '.join(users_list)}). Có thể chỉ ra cướp quyền điều khiển thiết bị hoặc chia sẻ trái phép."
-                
-                alerts.append({
-                    "type": "dhcp_device_user_mismatch",
-                    "subject": device,
-                    "severity": "WARNING",
-                    "score": 6.5,
-                    "text": alert_text,
-                    "evidence": {
-                        "device": device,
-                        "user_count": int(len(unique_users)),
-                        "users": users_list,
-                        "time_span_minutes": int(time_minutes),
-                    },
-                    "prompt_ctx": {
-                        "user": users_list[0] if len(users_list) > 0 else None,
-                        "group": None,
-                        "behavior": {"type": "device_user_mismatch", "users": len(unique_users)},
-                        "time": None,
-                        "baseline": {"expected_users_per_device": 1},
-                        "extras": {"reason": "Multiple users sharing same device in short time"},
-                    },
-                })
-    except Exception as e:
-        pass  # Silently skip if error
-    
-    return alerts
-
-def _detect_apache_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect Apache/web-based attacks (credential stuffing, path probing, SQLi, exfiltration, webshell)."""
-    alerts = []
-    
-    # Detect Apache logs by checking for Apache-specific columns (http_status, path, vhost)
-    # instead of relying on program column which may be missing
-    apache_indicators = ["http_status", "path", "vhost"]
-    has_apache_cols = any(col in df.columns for col in apache_indicators)
-    
-    # Also check if program column exists and is "apache"
-    has_apache_program = "program" in df.columns and df["program"].eq("apache").any()
-    
-    if not has_apache_cols and not has_apache_program:
-        return alerts
-    
-    try:
-        # Filter to Apache logs: either program=="apache" OR has Apache-specific columns
-        if has_apache_program:
-            apache_df = df[df["program"] == "apache"].copy()
-        else:
-            # Use all rows that have Apache-specific columns
-            apache_df = df.copy()
-        
-        if apache_df.empty:
-            return alerts
-        
-        # Extract path from message if not available
-        if "path" not in apache_df.columns and "message" in apache_df.columns:
-            def extract_path(msg):
-                if pd.isna(msg) or not isinstance(msg, str):
-                    return None
-                # Extract path from: "GET /path HTTP/1.1" or "POST /path?query HTTP/1.1"
-                match = re.search(r'"(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+([^\s?]+)', msg)
-                return match.group(1) if match else None
-            apache_df["path"] = apache_df["message"].apply(extract_path)
-        
-        # Use status column (may be named "status" or "http_status")
-        status_col = "http_status" if "http_status" in apache_df.columns else "status"
-        
-        # Extract status from message if status column is empty or missing
-        if status_col not in apache_df.columns or apache_df[status_col].isna().all():
-            if "message" in apache_df.columns:
-                def extract_status(msg):
-                    if pd.isna(msg) or not isinstance(msg, str):
-                        return None
-                    # Extract status from: "GET /path HTTP/1.1" 200 12345
-                    match = re.search(r'"\s+(\d+)\s+', msg)
-                    return match.group(1) if match else None
-                apache_df[status_col] = apache_df["message"].apply(extract_status)
-        
-        # ALWAYS extract username from Apache log message (may override existing username column)
-        if "message" in apache_df.columns:
-            def extract_apache_user(msg):
-                if pd.isna(msg) or not isinstance(msg, str):
-                    return None
-                # Pattern: IP - username [timestamp] "METHOD
-                match = re.search(r'\d+\.\d+\.\d+\.\d+\s+-\s+(\S+)\s+\[', msg)
-                if match:
-                    user = match.group(1)
-                    return user if user != "-" else None
-                return None
-            apache_df["extracted_username"] = apache_df["message"].apply(extract_apache_user)
-            
-            # Override username column with extracted value if extraction was successful
-            valid_extractions = apache_df["extracted_username"].notna().sum()
-            import sys
-            print(f"[DEBUG] Extracted {valid_extractions} usernames from {len(apache_df)} Apache log entries", file=sys.stderr)
-            
-            if valid_extractions > 0:
-                if "username" in apache_df.columns:
-                    # Merge: use extracted if available, otherwise keep original
-                    apache_df["username"] = apache_df["extracted_username"].fillna(apache_df["username"])
-                else:
-                    apache_df["username"] = apache_df["extracted_username"]
-                    
-                unique_users = apache_df["username"].dropna().nunique()
-                sample_users = apache_df["username"].dropna().unique().tolist()[:5]
-                print(f"[DEBUG] Total unique users in Apache logs: {unique_users}, samples: {sample_users}", file=sys.stderr)
-        
-        # Convert status to numeric for all detections
-        apache_df["status_code"] = pd.to_numeric(apache_df[status_col], errors="coerce")
-        
-        
-        # Extract additional fields needed for user behavior analysis
-        if "method" not in apache_df.columns and "message" in apache_df.columns:
-            def extract_method(msg):
-                if pd.isna(msg) or not isinstance(msg, str):
-                    return None
-                match = re.search(r'"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+', msg, re.IGNORECASE)
-                return match.group(1) if match else None
-            apache_df["method"] = apache_df["message"].apply(extract_method)
-        
-        if "bytes_sent" not in apache_df.columns and "message" in apache_df.columns:
-            def extract_bytes(msg):
-                if pd.isna(msg) or not isinstance(msg, str):
-                    return None
-                match = re.search(r'"\s+\d+\s+(\d+)', msg)
-                return match.group(1) if match else None
-            apache_df["bytes_sent"] = apache_df["message"].apply(extract_bytes)
-        apache_df["bytes_num"] = pd.to_numeric(apache_df["bytes_sent"], errors="coerce")
-        
-        # ============================================================
-        # USER-CENTRIC DETECTION: Track all behaviors per user
-        # ============================================================
-        from collections import defaultdict
-        user_activities = defaultdict(lambda: {
-            "account_takeover": False,
-            "takeover_ips": [],
-            "account_takeover_internal": False,
-            "takeover_ips_internal": [],
-            "total_200_success_internal": 0,
-            "internal_movement": False,
-            "internal_ips": [],
-            "exfiltration_files": [],
-            "suspicious_operations": [],
-            "all_source_ips": set(),
-            "total_401_failures": 0,
-            "total_200_success": 0,
-        })
-        
-        # Step 1: Detect Brute Force & Account Takeover
-        auth_failures = apache_df[apache_df["status_code"] == 401]
-        print(f"[DEBUG] Found {len(auth_failures)} total 401 auth failures", file=sys.stderr)
-        
-        if len(auth_failures) > 5:
-            # Get all IPs involved in brute force
-            ip_failure_counts = auth_failures["source_ip"].value_counts()
-            all_ips = ip_failure_counts.index.tolist()
-            
-            # Track 401 failures per user
-            for idx, row in auth_failures.iterrows():
-                username = row.get("username")
-                if pd.notna(username) and username != "-":
-                    user_activities[username]["total_401_failures"] += 1
-                    user_activities[username]["all_source_ips"].add(row.get("source_ip"))
-            
-            # ============================================================
-            # ACCOUNT TAKEOVER DETECTION (FIXED - No False Positives)
-            # ============================================================
-            # OLD WRONG LOGIC:
-            #   all_ips = [IPs with 401]
-            #   successful_logins = [200 OK from any IP in all_ips]
-            #   => Flag ALL as takeover (FALSE POSITIVE for normal users)
-            #
-            # NEW CORRECT LOGIC:
-            #   For each IP:
-            #     IF same IP has BOTH 401 failures AND 200 success:
-            #       => Account Takeover (attacker succeeded!)
-            #     ELSE:
-            #       => Just brute force attempt, no compromise
-            
-            print(f"[DEBUG] Checking {len(all_ips)} IPs for Account Takeover (SAME IP must have both 401+200)", file=sys.stderr)
-            
-            # Helper function to check if IP is public
-            def is_public_ip(ip_str):
-                if pd.isna(ip_str):
-                    return False
-                ip = str(ip_str)
-                # Private IP ranges: 10.x.x.x, 192.168.x.x, 172.16-31.x.x
-                if ip.startswith("10.") or ip.startswith("192.168."):
-                    return False
-                if ip.startswith("172."):
-                    try:
-                        second_octet = int(ip.split(".")[1])
-                        if 16 <= second_octet <= 31:
-                            return False
-                    except:
-                        pass
-                return True  # Assume public if not in private ranges
-            
-            # For each IP that had failures, check if it ALSO had successes
-            takeover_count_public = 0
-            takeover_count_internal = 0
-            
-            for ip in all_ips:
-                # Get failures from THIS IP
-                ip_failures = auth_failures[auth_failures["source_ip"] == ip]
-                
-                # Get successes from THIS SAME IP
-                ip_successes = apache_df[(apache_df["source_ip"] == ip) & (apache_df["status_code"] == 200)]
-                
-                # ONLY flag if SAME IP has BOTH failures and successes
-                if len(ip_failures) > 0 and len(ip_successes) > 0:
-                    # This IP tried many times (401) then succeeded (200) = Real Attack!
-                    compromised_users = ip_successes["username"].dropna().unique().tolist()
-                    is_public = is_public_ip(ip)
-                    
-                    for user in compromised_users:
-                        if user and user != "-":
-                            user_logins = ip_successes[ip_successes["username"] == user]
-                            
-                            if is_public:
-                                # PUBLIC IP: CRITICAL 10.0 - External attack!
-                                user_activities[user]["account_takeover"] = True
-                                if ip not in user_activities[user]["takeover_ips"]:
-                                    user_activities[user]["takeover_ips"].append(ip)
-                                user_activities[user]["total_200_success"] += len(user_logins)
-                                takeover_count_public += 1
-                                print(f"[DEBUG] Account Takeover (Public) detected: {user} from {ip}", file=sys.stderr)
-                            else:
-                                # PRIVATE IP: WARNING 6.5 - Internal suspicious activity
-                                # Downgraded from CRITICAL per user feedback
-                                user_activities[user]["account_takeover_internal"] = True
-                                if ip not in user_activities[user]["takeover_ips_internal"]:
-                                    user_activities[user]["takeover_ips_internal"].append(ip)
-                                user_activities[user]["total_200_success_internal"] += len(user_logins)
-                                takeover_count_internal += 1
-                                # DON'T print debug for internal - too noisy
-            
-            if takeover_count_public > 0:
-                print(f"[DEBUG] Total Account Takeover (Public): {takeover_count_public} instances", file=sys.stderr)
-            if takeover_count_internal > 0:
-                print(f"[DEBUG] Total Account Takeover (Internal): {takeover_count_internal} instances (WARNING level)", file=sys.stderr)
-        
-        # Step 2: Detect Data Exfiltration (large file downloads)
-        export_patterns = [r"/export/", r"/download/", r"\.csv", r"\.zip", r"\.sql", r"/backup", r"all_customers", r"full_dump", r"all_invoices", r"/leads"]
-        export_requests = apache_df[apache_df["path"].str.contains("|".join(export_patterns), case=False, regex=True, na=False)]
-        
-        if len(export_requests) > 0:
-            large_exports = export_requests[export_requests["bytes_num"] > 50000]  # >50KB
-            print(f"[DEBUG] Found {len(large_exports)} large file downloads (>50KB)", file=sys.stderr)
-            
-            for idx, row in large_exports.iterrows():
-                username = row.get("username")
-                if pd.notna(username) and username != "-":
-                    user_activities[username]["exfiltration_files"].append({
-                        "path": row.get("path"),
-                        "size_mb": round(row.get("bytes_num", 0) / 1024 / 1024, 2),
-                        "timestamp": str(row.get("timestamp", ""))
-                    })
-                    user_activities[username]["all_source_ips"].add(row.get("source_ip"))
-        
-        # Step 3: Detect Suspicious Operations (DELETE requests + 500 errors)
-        delete_requests = apache_df[apache_df["method"].astype(str).str.upper() == "DELETE"]
-        server_errors = apache_df[apache_df["status_code"] == 500]
-        
-        for idx, row in delete_requests.iterrows():
-            username = row.get("username")
-            if pd.notna(username) and username != "-":
-                user_activities[username]["suspicious_operations"].append({
-                    "type": "DELETE",
-                    "path": row.get("path"),
-                    "status": int(row.get("status_code", 0)),
-                    "timestamp": str(row.get("timestamp", ""))
-                })
-        
-        for idx, row in server_errors.iterrows():
-            username = row.get("username")
-            if pd.notna(username) and username != "-":
-                user_activities[username]["suspicious_operations"].append({
-                    "type": "500_ERROR",
-                    "path": row.get("path"),
-                    "method": row.get("method"),
-                    "timestamp": str(row.get("timestamp", ""))
-                })
-        
-        # ============================================================
-        # Generate Per-User Alerts
-        # ============================================================
-        print(f"[DEBUG] Generating alerts for {len(user_activities)} users", file=sys.stderr)
-        
-        for username, activities in user_activities.items():
-            # Skip if user has no significant activities
-            if (not activities["account_takeover"] and 
-                not activities["account_takeover_internal"] and
-                not activities["internal_movement"] and
-                len(activities["exfiltration_files"]) == 0 and 
-                len(activities["suspicious_operations"]) == 0 and
-                activities["total_401_failures"] < 5):
-                continue
-            
-            # ============================================================
-            # MULTIPLE ALERTS PER USER (separate by behavior type)
-            # ============================================================
-            
-            # ALERT 1: Account Takeover from Public IPs (CRITICAL 10.0)
-            if activities["account_takeover"]:
-                ips_str = ", ".join(activities["takeover_ips"][:3])
-                alert_text = f"User {username}: Account Takeover from PUBLIC IPs - {len(activities['takeover_ips'])} external IPs ({ips_str})"
-                alerts.append({
-                    "type": "account_takeover",
-                    "subject": username,
-                    "severity": "CRITICAL",
-                    "score": 10.0,
-                    "text": alert_text,
-                    "evidence": {
-                        "takeover_ips": activities["takeover_ips"],
-                        "total_200_success": activities["total_200_success"],
-                        "ip_classification": "public"
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "account_takeover", "from_public_ip": True}},
-                })
-            
-            # ALERT 1B: Account Takeover from Private IPs (WARNING 6.5 - Downgraded per user feedback)
-            if activities["account_takeover_internal"]:
-                ips_str = ", ".join(activities["takeover_ips_internal"][:3])
-                alert_text = f"User {username}: Suspicious activity - Login from internal IP after brute force - {len(activities['takeover_ips_internal'])} IPs ({ips_str})"
-                alerts.append({
-                    "type": "account_takeover_internal",
-                    "subject": username,
-                    "severity": "WARNING",  # Downgraded from CRITICAL
-                    "score": 6.5,  # Downgraded from 9.0
-                    "text": alert_text,
-                    "evidence": {
-                        "takeover_ips": activities["takeover_ips_internal"],
-                        "total_200_success": activities["total_200_success_internal"],
-                        "ip_classification": "private"
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "suspicious_internal_login", "from_public_ip": False}},
-                })
-            
-            # ALERT 2: Internal Movement (WARNING) - from Private IPs
-            if activities["internal_movement"]:
-                alert_text = f"User {username}: Suspicious internal movement - Login from {len(activities['internal_ips'])} different internal IPs"
-                alerts.append({
-                    "type": "internal_movement",
-                    "subject": username,
-                    "severity": "WARNING",
-                    "score": 6.5,
-                    "text": alert_text,
-                    "evidence": {
-                        "internal_ips": activities["internal_ips"],
-                        "ip_classification": "private"
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "lateral_movement"}},
-                })
-            
-            # ALERT 3: Data Exfiltration (CRITICAL/WARNING based on volume)
-            if len(activities["exfiltration_files"]) > 0:
-                total_mb = sum(f["size_mb"] for f in activities["exfiltration_files"])
-                file_names = [f["path"] for f in activities["exfiltration_files"][:3]]
-                alert_text = f"User {username}: Downloaded {len(activities['exfiltration_files'])} large files ({total_mb:.1f}MB) - {', '.join(file_names)}"
-                alerts.append({
-                    "type": "data_exfiltration",
-                    "subject": username,
-                    "severity": "CRITICAL" if total_mb > 5 else "WARNING",
-                    "score": 8.5 if total_mb > 5 else 7.0,
-                    "text": alert_text,
-                    "evidence": {
-                        "exfiltration_files_count": len(activities["exfiltration_files"]),
-                        "exfiltration_total_mb": round(total_mb, 2),
-                        "exfiltration_files": activities["exfiltration_files"][:5]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "data_exfiltration"}},
-                })
-            
-            # ALERT 4: Suspicious Operations (WARNING)
-            if len(activities["suspicious_operations"]) > 0:
-                delete_count = sum(1 for op in activities["suspicious_operations"] if op["type"] == "DELETE")
-                error_count = sum(1 for op in activities["suspicious_operations"] if op["type"] == "500_ERROR")
-                
-                if delete_count > 0 and error_count > 0:
-                    alert_text = f"User {username}: {delete_count} DELETE requests + {error_count} 500 errors"
-                elif delete_count > 0:
-                    alert_text = f"User {username}: {delete_count} DELETE requests"
-                else:
-                    alert_text = f"User {username}: {error_count} 500 server errors"
-                
-                alerts.append({
-                    "type": "suspicious_operations",
-                    "subject": username,
-                    "severity": "WARNING",
-                    "score": 7.5,
-                    "text": alert_text,
-                    "evidence": {
-                        "suspicious_operations_count": len(activities["suspicious_operations"]),
-                        "delete_count": delete_count,
-                        "error_count": error_count,
-                        "suspicious_operations": activities["suspicious_operations"][:5]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "suspicious_operations"}},
-                })
-            
-            # ALERT 5: Brute Force Target (if 401 failures without takeover)
-            if activities["total_401_failures"] >= 10 and not activities["account_takeover"]:
-                alert_text = f"User {username}: Brute force target - {activities['total_401_failures']} failed login attempts"
-                alerts.append({
-                    "type": "brute_force_target",
-                    "subject": username,
-                    "severity": "WARNING",
-                    "score": 7.0,
-                    "text": alert_text,
-                    "evidence": {
-                        "total_401_failures": activities["total_401_failures"],
-                        "all_source_ips": list(activities["all_source_ips"])[:10]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "brute_force_target"}},
-                })
-        
-        print(f"[DEBUG] Generated {len(alerts)} user-based alerts", file=sys.stderr)
-    
-    except Exception as e:
-        import sys
-        import traceback
-        print(f"[DEBUG] Apache anomaly detection error: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-    
-    return alerts
-
-def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect firewall-based attacks (deny burst, exfiltration, port scan, policy evasion, rogue).
-    
-    Enhanced to detect:
-    - Traditional firewall logs (program == "firewall")
-    - UFW logs (program == "kernel" with "[UFW BLOCK]" or "[UFW ALLOW]" in message)
-    """
-    alerts = []
-    
-    # DEBUG: Check input dataframe
-    import sys
-    print(f"\n[DEBUG] _detect_firewall_anomalies called with {len(df)} rows", file=sys.stderr)
-    print(f"[DEBUG] Columns: {df.columns.tolist()}", file=sys.stderr)
-    
-    # Check for both traditional firewall logs AND UFW logs
-    has_firewall = "program" in df.columns and df["program"].eq("firewall").any()
-    has_ufw = "message" in df.columns and df["message"].astype(str).str.contains(r"\[UFW (BLOCK|ALLOW)\]", case=False, na=False).any()
-    
-    print(f"[DEBUG] has_firewall={has_firewall}, has_ufw={has_ufw}", file=sys.stderr)
-    
-    # DEBUG: Check sample messages
-    if "message" in df.columns:
-        sample_messages = df["message"].head(5).tolist()
-        print(f"[DEBUG] Sample messages:", file=sys.stderr)
-        for i, msg in enumerate(sample_messages):
-            print(f"  [{i}] {str(msg)[:150]}", file=sys.stderr)
-    
-    # DEBUG: Check if program column exists and its values
-    if "program" in df.columns:
-        programs = df["program"].unique().tolist()[:10]
-        print(f"[DEBUG] Program values: {programs}", file=sys.stderr)
-    
-    if not has_firewall and not has_ufw:
-        print(f"[DEBUG] No firewall or UFW logs found, returning empty alerts", file=sys.stderr)
-        return alerts
-
-    
-    try:
-        # Collect firewall-related logs
-        fw_df = pd.DataFrame()
-        
-        # 1. Traditional firewall logs
-        if has_firewall:
-            fw_df = df[df["program"] == "firewall"].copy()
-        
-        # 2. UFW logs (kernel program with UFW patterns)
-        if has_ufw:
-            print(f"[DEBUG] Processing UFW logs...", file=sys.stderr)
-            ufw_df = df[df["message"].astype(str).str.contains(r"\[UFW (BLOCK|ALLOW)\]", case=False, na=False)].copy()
-            
-            print(f"[DEBUG] Found {len(ufw_df)} UFW log entries", file=sys.stderr)
-            
-            # Parse UFW log fields from message
-            # Example: [UFW BLOCK] IN=eth0 OUT= MAC=... SRC=113.161.72.15 DST=10.10.10.5 LEN=40 ... PROTO=TCP SPT=45678 DPT=21 ...
-            if not ufw_df.empty:
-                # Extract fields using regex
-                ufw_df["ufw_action"] = ufw_df["message"].str.extract(r"\[UFW (BLOCK|ALLOW)\]", flags=re.IGNORECASE)[0].str.lower()
-                ufw_df["source_ip"] = ufw_df["message"].str.extract(r"SRC=([0-9\.]+)")[0]
-                ufw_df["dest_ip"] = ufw_df["message"].str.extract(r"DST=([0-9\.]+)")[0]
-                ufw_df["dest_port"] = ufw_df["message"].str.extract(r"DPT=(\d+)")[0]
-                ufw_df["protocol"] = ufw_df["message"].str.extract(r"PROTO=(\w+)")[0]
-                
-                # DEBUG: Show parsed fields
-                print(f"[DEBUG] Parsed UFW fields:", file=sys.stderr)
-                print(f"  - Actions: {ufw_df['ufw_action'].unique().tolist()}", file=sys.stderr)
-                print(f"  - Source IPs: {ufw_df['source_ip'].unique().tolist()}", file=sys.stderr)
-                print(f"  - Dest ports: {ufw_df['dest_port'].unique().tolist()}", file=sys.stderr)
-                
-                # Map UFW action to standard action column
-                if "action" not in ufw_df.columns:
-                    ufw_df["action"] = ufw_df["ufw_action"]
-                
-                # Merge with existing firewall logs if present
-                if not fw_df.empty:
-                    # Combine both datasets
-                    fw_df = pd.concat([fw_df, ufw_df], ignore_index=True)
-                else:
-                    fw_df = ufw_df
-        
-        if fw_df.empty:
-            return alerts
-        
-        # === UFW-SPECIFIC DETECTION: Port Scanning ===
-        # Detect when same source IP scans multiple destination ports
-        if "dest_port" in fw_df.columns and "source_ip" in fw_df.columns:
-            fw_df["dest_port_num"] = pd.to_numeric(fw_df["dest_port"], errors="coerce")
-            
-            # Group by source IP and count unique ports scanned
-            src_ports = fw_df[fw_df["dest_port_num"].notna()].groupby("source_ip")["dest_port_num"].agg(["nunique", "count", lambda x: sorted(x.unique().tolist())])
-            src_ports.columns = ["unique_ports", "total_attempts", "ports_list"]
-            
-            # Port scan threshold: 5+ unique ports from same IP = suspicious
-            scan_sources = src_ports[src_ports["unique_ports"] >= 5]
-            
-            if len(scan_sources) > 0:
-                for src_ip, row in scan_sources.iterrows():
-                    unique_ports = int(row["unique_ports"])
-                    total_attempts = int(row["total_attempts"])
-                    ports_list = row["ports_list"][:10]  # First 10 ports
-                    
-                    alert_text = f"Port scanning detected from {src_ip}: scanned {unique_ports} unique ports in {total_attempts} attempts. Ports: {ports_list}"
-                    alerts.append({
-                        "type": "firewall_portscan",
-                        "subject": str(src_ip),
-                        "severity": "CRITICAL" if unique_ports >= 10 else "WARNING",
-                        "score": min(7.0 + (unique_ports / 10), 10.0),
-                        "text": alert_text,
-                        "evidence": {
-                            "source_ip": str(src_ip),
-                            "unique_ports": unique_ports,
-                            "total_attempts": total_attempts,
-                            "ports_scanned": [int(p) for p in ports_list if pd.notna(p)]
-                        },
-                        "prompt_ctx": {"behavior": {"type": "firewall_portscan", "source_ip": str(src_ip), "ports": unique_ports}},
-                    })
-        
-        # === UFW-SPECIFIC DETECTION: Deny/Block Bursts ===
-        # Detect high volume of blocked connections
-        if "action" in fw_df.columns or "ufw_action" in fw_df.columns:
-            action_col = "ufw_action" if "ufw_action" in fw_df.columns else "action"
-            
-            # Count BLOCK/DENY events
-            deny_mask = fw_df[action_col].astype(str).str.lower().isin(["block", "deny"])
-            deny_count = deny_mask.sum()
-            
-            if deny_count >= 5:  # Lowered threshold for UFW (was 30 for traditional firewall)
-                denied_df = fw_df[deny_mask]
-                unique_sources = denied_df["source_ip"].nunique() if "source_ip" in denied_df.columns else 0
-                unique_dests = denied_df["dest_ip"].nunique() if "dest_ip" in denied_df.columns else 0
-                
-                # Get top source IPs
-                top_sources = []
-                if "source_ip" in denied_df.columns:
-                    top_sources = denied_df["source_ip"].value_counts().head(3).index.tolist()
-                
-                alert_text = f"Firewall DENY/BLOCK burst detected: {int(deny_count)} blocked connections from {int(unique_sources)} source IPs to {int(unique_dests)} destinations. Top sources: {top_sources}"
-                alerts.append({
-                    "type": "firewall_deny_burst",
-                    "subject": "Firewall Security",
-                    "severity": "CRITICAL" if deny_count >= 20 else "WARNING",
-                    "score": min(6.0 + (deny_count / 10), 10.0),
-                    "text": alert_text,
-                    "evidence": {
-                        "deny_count": int(deny_count),
-                        "unique_sources": int(unique_sources),
-                        "unique_destinations": int(unique_dests),
-                        "top_source_ips": [str(ip) for ip in top_sources]
-                    },
-                    "prompt_ctx": {"behavior": {"type": "firewall_deny_burst", "count": int(deny_count)}},
-                })
-        
-        # === TRADITIONAL FIREWALL DETECTIONS (kept for backward compatibility) ===
-        
-        # 3. Detect Exfiltration (high bytes to external destinations)
-        if "bytes_sent" in fw_df.columns and "dest_ip" in fw_df.columns:
-            fw_df["bytes_num"] = pd.to_numeric(fw_df["bytes_sent"], errors="coerce")
-            high_traffic = fw_df[fw_df["bytes_num"] > 200000]
-            if len(high_traffic) > 5:
-                total_bytes = high_traffic["bytes_num"].sum()
-                unique_dests = high_traffic["dest_ip"].nunique()
-                alert_text = f"Data exfiltration suspected: {len(high_traffic)} high-volume transfers ({int(total_bytes/1024/1024)}MB) to {unique_dests} destinations"
-                alerts.append({
-                    "type": "firewall_exfiltration",
-                    "subject": "Firewall Security",
-                    "severity": "CRITICAL",
-                    "score": 9.0,
-                    "text": alert_text,
-                    "evidence": {"high_traffic_count": int(len(high_traffic)), "total_mb": int(total_bytes/1024/1024)},
-                    "prompt_ctx": {"behavior": {"type": "firewall_exfiltration"}},
-                })
-        
-        # 4. Detect Policy Evasion (unusual port/protocol combinations)
-        if "dest_port" in fw_df.columns and "protocol" in fw_df.columns:
-            # Check for suspicious port/protocol pairs
-            fw_df["dest_port_num"] = pd.to_numeric(fw_df["dest_port"], errors="coerce")
-            suspicious = fw_df[
-                ((fw_df["dest_port_num"] != 22) & (fw_df["protocol"] == "TCP")) |
-                ((fw_df["dest_port_num"] != 25) & (fw_df["protocol"] == "TCP"))
-            ]
-            if len(suspicious) > 10:
-                alert_text = f"Policy evasion detected: {len(suspicious)} unusual protocol/port combinations"
-                alerts.append({
-                    "type": "firewall_policy_evasion",
-                    "subject": "Firewall Security",
-                    "severity": "WARNING",
-                    "score": 6.5,
-                    "text": alert_text,
-                    "evidence": {"suspicious_count": int(len(suspicious))},
-                    "prompt_ctx": {"behavior": {"type": "firewall_policy_evasion"}},
-                })
-        
-        # 5. Detect Rogue Internal Activity (internal-to-internal with unusual rules)
-        if "username" in fw_df.columns and "device" in fw_df.columns and "source_ip" in fw_df.columns:
-            internal_flow = fw_df[fw_df["source_ip"].str.startswith(("10.", "172.", "192."), na=False)]
-            if len(internal_flow) > 0:
-                # Check for users accessing unusual admin destinations
-                admin_dests = internal_flow[internal_flow["dest_ip"].str.contains("40\\.40\\.|40\\.30\\.", regex=True, na=False)]
-                if len(admin_dests) > 20:
-                    unique_users = admin_dests["username"].nunique()
-                    alert_text = f"Rogue internal activity: {len(admin_dests)} suspicious admin destination accesses by {unique_users} users"
-                    alerts.append({
-                        "type": "firewall_rogue_internal",
-                        "subject": "Firewall Security",
-                        "severity": "CRITICAL",
-                        "score": 8.0,
-                        "text": alert_text,
-                        "evidence": {"admin_accesses": int(len(admin_dests)), "unique_users": int(unique_users)},
-                        "prompt_ctx": {"behavior": {"type": "firewall_rogue_internal"}},
-                    })
-    
-    except Exception as e:
-        import sys
-        print(f"[DEBUG] Firewall anomaly detection error: {e}", file=sys.stderr)
-        pass
-    
-    return alerts
-
-
-def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect DNS-based attacks (amplification, DGA, NXDOMAIN storm, tunneling) - PER USER."""
-    alerts = []
-    
-    if "program" not in df.columns or not df["program"].eq("dnsmasq").any():
-        return alerts
-    
-    try:
-        dns_df = df[df["program"] == "dnsmasq"].copy()
-        if dns_df.empty:
-            return alerts
-        
-        # Extract username from DNS logs if available
-        # DNS logs may have username in message or separate field
-        if "username" not in dns_df.columns and "message" in dns_df.columns:
-            def extract_dns_user(msg):
-                if pd.isna(msg) or not isinstance(msg, str):
-                    return None
-                # Try to extract user from DNS log message
-                match = re.search(r'user[=:](\S+)', msg, re.IGNORECASE)
-                return match.group(1) if match else None
-            dns_df["username"] = dns_df["message"].apply(extract_dns_user)
-        
-        # If still no username, prefer hostname over IP
-        if "username" not in dns_df.columns or dns_df["username"].isna().all():
-            # Priority 1: Use 'host' or 'hostname' field if available  
-            if "host" in dns_df.columns:
-                dns_df["username"] = dns_df["host"].fillna("unknown")
-            elif "hostname" in dns_df.columns:
-                dns_df["username"] = dns_df["hostname"].fillna("unknown")
-            # Priority 2: Fallback to source_ip
-            elif "source_ip" in dns_df.columns:
-                dns_df["username"] = dns_df["source_ip"].fillna("unknown")
-            else:
-                dns_df["username"] = "unknown"
-        
-        import sys
-        from collections import defaultdict
-        
-        # Track DNS activities per user
-        user_activities = defaultdict(lambda: {
-            "amplification_queries": [],
-            "nxdomain_queries": [],
-            "suspicious_domains": [],
-            "tunneling_queries": [],
-            "total_queries": 0,
-        })
-        
-        # Track queries per user
-        for idx, row in dns_df.iterrows():
-            username = row.get("username")
-            if pd.isna(username) or username == "-":
-                username = row.get("source_ip", "unknown")
-            
-            user_activities[username]["total_queries"] += 1
-            
-            # Track amplification (LARGE_ANSWER status)
-            if row.get("status") == "large_answer":
-                user_activities[username]["amplification_queries"].append({
-                    "domain": row.get("domain"),
-                    "timestamp": str(row.get("timestamp", ""))
-                })
-            
-            # Track NXDOMAIN
-            if row.get("status") == "nxdomain":
-                user_activities[username]["nxdomain_queries"].append({
-                    "domain": row.get("domain"),
-                    "timestamp": str(row.get("timestamp", ""))
-                })
-            
-            # Track suspicious domains (DGA-like)
-            domain = str(row.get("domain", ""))
-            if domain and len(domain) > 10:
-                # Simple DGA heuristic: long domain with few vowels
-                if len(domain) > 20 or (len(domain) > 10 and not any(c in domain.lower() for c in "aeiou")):
-                    user_activities[username]["suspicious_domains"].append({
-                        "domain": domain,
-                        "timestamp": str(row.get("timestamp", ""))
-                    })
-            
-            # Track DNS tunneling (TXT queries with suspicious patterns)
-            if row.get("query_type") == "TXT" and pd.notna(row.get("domain")):
-                if any(pattern in str(row.get("domain", "")).lower() for pattern in ["_dns", "exfil", "tunnel"]):
-                    user_activities[username]["tunneling_queries"].append({
-                        "domain": row.get("domain"),
-                        "timestamp": str(row.get("timestamp", ""))
-                    })
-        
-        print(f"[DEBUG] DNS: Analyzing {len(user_activities)} users/IPs", file=sys.stderr)
-        
-        # Generate alerts per user
-        for username, activities in user_activities.items():
-            # ALERT 1: DNS Amplification
-            if len(activities["amplification_queries"]) >= 3:
-                alert_text = f"User/IP {username}: {len(activities['amplification_queries'])} DNS amplification queries (LARGE_ANSWER/NSEC)"
-                alerts.append({
-                    "type": "dns_amplification",
-                    "subject": username,
-                    "severity": "CRITICAL",
-                    "score": 8.5,
-                    "text": alert_text,
-                    "evidence": {
-                        "amplification_count": len(activities["amplification_queries"]),
-                        "examples": activities["amplification_queries"][:5]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_amplification"}},
-                })
-            
-            # ALERT 2: NXDOMAIN Flood
-            if len(activities["nxdomain_queries"]) >= 10:
-                alert_text = f"User/IP {username}: {len(activities['nxdomain_queries'])} NXDOMAIN queries (potential scanning)"
-                alerts.append({
-                    "type": "dns_nxdomain_flood",
-                    "subject": username,
-                    "severity": "WARNING",
-                    "score": 6.5,
-                    "text": alert_text,
-                    "evidence": {
-                        "nxdomain_count": len(activities["nxdomain_queries"]),
-                        "examples": activities["nxdomain_queries"][:5]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_nxdomain_flood"}},
-                })
-            
-            # ALERT 3: Suspicious Domains (DGA/Malware)
-            if len(activities["suspicious_domains"]) >= 3:
-                unique_domains = list({d["domain"] for d in activities["suspicious_domains"]})
-                alert_text = f"User/IP {username}: {len(unique_domains)} suspicious domains (potential DGA/malware)"
-                alerts.append({
-                    "type": "dns_suspicious_domains",
-                    "subject": username,
-                    "severity": "WARNING",
-                    "score": 7.5,
-                    "text": alert_text,
-                    "evidence": {
-                        "suspicious_domain_count": len(unique_domains),
-                        "examples": unique_domains[:5],
-                        "details": activities["suspicious_domains"][:5]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_dga"}},
-                })
-            
-            # ALERT 4: DNS Tunneling
-            if len(activities["tunneling_queries"]) > 0:
-                alert_text = f"User/IP {username}: {len(activities['tunneling_queries'])} DNS tunneling queries (data exfiltration)"
-                alerts.append({
-                    "type": "dns_tunneling",
-                    "subject": username,
-                    "severity": "CRITICAL",
-                    "score": 9.0,
-                    "text": alert_text,
-                    "evidence": {
-                        "tunneling_count": len(activities["tunneling_queries"]),
-                        "examples": activities["tunneling_queries"][:5]
-                    },
-                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_tunneling"}},
-                })
-        
-        print(f"[DEBUG] DNS: Generated {len(alerts)} user-based alerts", file=sys.stderr)
-    
-    except Exception:
-        pass
-    
-    return alerts
-
-def _detect_network_link_flap(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect network link flapping (eth0 Link Up events on multiple servers).""" 
-    alerts = []
-    
-    if "message" not in df.columns or "host" not in df.columns:
-        return alerts
-    
-    try:
-        # Filter logs with "Link is Up" pattern
-        link_up_logs = df[df["message"].astype(str).str.contains(r"eth\d+:.*Link is Up", case=False, regex=True, na=False)].copy()
-        
-        if len(link_up_logs) == 0:
-            return alerts
-        
-        # Count unique servers and total events
-        unique_servers = link_up_logs["host"].nunique()
-        total_events = len(link_up_logs)
-        
-        # Alert if link flap affects many servers (network infrastructure issue)
-        if unique_servers >= 10 or total_events >= 20:
-            # Get affected servers list
-            affected_servers = link_up_logs["host"].unique().tolist()[:15]  # Top 15
-            
-            alert_text = f"Network link flap detected: eth0 Link Up on {unique_servers} servers ({total_events} events)"
-            
-            alerts.append({
-                "type": "network_link_flap",
-                "subject": "Network Infrastructure",
-                "severity": "CRITICAL" if unique_servers >= 15 else "WARNING",
-                "score": min(8.0 + (unique_servers / 10), 10.0),
-                "text": alert_text,
-                "evidence": {"unique_servers": int(unique_servers), "total_events": int(total_events), "affected_servers": [str(s) for s in affected_servers]},
-                "prompt_ctx": {"behavior": {"type": "network_link_flap"}},
-            })
-    except Exception as e:
-        import sys
-        print(f"[DEBUG] Network link flap error: {e}", file=sys.stderr)
-    return alerts
-
-def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect cron job overlaps (same script running multiple times by different users)."""
-    alerts = []
-    if "message" not in df.columns or "program" not in df.columns:
-        return alerts
-    try:
-        cron_logs = df[df["program"].astype(str).str.contains(r"cron\[", case=False, na=False)].copy()
-        if len(cron_logs) == 0:
-            return alerts
-        cron_logs["cron_user"] = cron_logs["message"].str.extract(r"\(([^)]+)\)\s+CMD", flags=re.IGNORECASE)[0]
-        cron_logs["cron_script"] = cron_logs["message"].str.extract(r"CMD\s+\(([^)]+)\)", flags=re.IGNORECASE)[0]
-        cron_logs = cron_logs[cron_logs["cron_script"].notna() & cron_logs["cron_user"].notna()]
-        if len(cron_logs) == 0:
-            return alerts
-        for script, group in cron_logs.groupby("cron_script"):
-            execution_count = len(group)
-            unique_users = group["cron_user"].nunique()
-            users_list = group["cron_user"].unique().tolist()
-            if execution_count >= 10 and unique_users >= 3:
-                host = group["host"].iloc[0] if "host" in group.columns else "unknown"
-                alert_text = f"Cron job overlap: script '{script}' executed {execution_count} times by {unique_users} users"
-                alerts.append({
-                    "type": "cron_job_overlap",
-                    "subject": str(host),
-                    "severity": "WARNING",
-                    "score": min(5.0 + (execution_count / 10), 8.0),
-                    "text": alert_text,
-                    "evidence": {"script": str(script), "execution_count": int(execution_count), "unique_users": int(unique_users), "users": [str(u) for u in users_list]},
-                    "prompt_ctx": {"behavior": {"type": "cron_job_overlap"}},
-                })
-    except Exception as e:
-        import sys
-        print(f"[DEBUG] Cron overlap error: {e}", file=sys.stderr)
-    return alerts
-
-def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect SSH successful login bursts (potential lateral movement)."""
-    alerts = []
-    if "message" not in df.columns or "program" not in df.columns:
-        return alerts
-    try:
-        ssh_logs = df[df["program"].astype(str).str.contains(r"sshd\[", case=False, na=False)].copy()
-        if len(ssh_logs) == 0:
-            return alerts
-        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted publickey", case=False, na=False)]
-        if len(successful_logins) == 0:
-            return alerts
-        login_count = len(successful_logins)
-        if login_count >= 30:
-            unique_hosts = successful_logins["host"].nunique() if "host" in successful_logins.columns else 0
-            affected_hosts = successful_logins["host"].unique().tolist()[:5] if "host" in successful_logins.columns else []
-            alert_text = f"SSH login burst: {login_count} successful logins to {unique_hosts} servers"
-            subject = f"CI/CD Infrastructure ({', '.join([str(h) for h in affected_hosts[:3]])})"
-            alerts.append({
-                "type": "ssh_login_burst",
-                "subject": subject,
-                "severity": "WARNING",
-                "score": min(5.0 + (login_count / 30), 8.0),
-                "text": alert_text,
-                "evidence": {"login_count": int(login_count), "unique_hosts": int(unique_hosts), "affected_hosts": [str(h) for h in affected_hosts]},
-                "prompt_ctx": {"behavior": {"type": "ssh_login_burst"}},
-            })
-    except Exception as e:
-        import sys
-        print(f"[DEBUG] SSH burst error: {e}", file=sys.stderr)
-    return alerts
-
-def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[str, Any]]:
+def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str = None, log_type: str = "generic") -> List[Dict[str, Any]]:
     """
     Step-2 generator: compare current window against stored baselines to produce human-readable alerts.
+    Lấy baseline từ MongoDB theo log_type.
     Returns a list of dicts {type, subject, severity, score, text, evidence}
-    
-    This improved version handles mixed logs (normal + attack) by using multiple detection strategies:
-    1. Pattern-based detection (high-confidence attacks)
-    2. Statistical deviation from baseline
-    3. Behavioral anomalies (spike detection)
     """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return []
     df = _to_dt_utc(df)
 
-    base = _load_baseline_tables(baselines_dir)
-    us = base.get("user_stats")
-    user_stats = us if isinstance(us, pd.DataFrame) else pd.DataFrame()
-    if not user_stats.empty:
-        # Normalize username dtype to string to avoid object/float merge conflicts
-        if "username" in user_stats.columns:
-            user_stats = user_stats.copy()
-            user_stats["username"] = user_stats["username"].astype(str)
-    gs = base.get("global_stats")
-    global_stats = gs if isinstance(gs, dict) else {}
+    # Load baselines from MongoDB (priority) or file system (fallback)
+    try:
+        from services.database import (
+            load_user_stats, load_device_stats, load_group_stats, load_global_stats
+        )
+        user_stats = load_user_stats(log_type=log_type)
+        device_stats = load_device_stats(log_type=log_type)
+        group_stats = load_group_stats(log_type=log_type)
+        global_stats = load_global_stats(log_type=log_type)
+    except Exception:
+        # Fallback: load từ file system
+        base = _load_baseline_tables(baselines_dir or "")
+        user_stats = base.get("user_stats", pd.DataFrame())
+        global_stats = base.get("global_stats", {})
+
+    if not isinstance(user_stats, pd.DataFrame):
+        user_stats = pd.DataFrame()
+    if not isinstance(global_stats, dict):
+        global_stats = {}
+    
+    # Normalize username dtype
+    if not user_stats.empty and "username" in user_stats.columns:
+        user_stats = user_stats.copy()
+        user_stats["username"] = user_stats["username"].astype(str)
 
     alerts: List[Dict[str, Any]] = []
 
-    # ===== SECTION 0: ENHANCED DETECTION FOR MIXED LOGS =====
-    
-    # 0A) SSH Brute Force Detection - detect rapid SSH attempts
-    if "action" in df.columns and "status" in df.columns and "username" in df.columns:
-        try:
-            ssh_logs = df[df.get("program", pd.Series(index=df.index)).astype(str).str.contains("sshd", case=False, na=False) |
-                         df.get("action", pd.Series(index=df.index)).astype(str).str.contains("login|logon", case=False, na=False)]
-            if not ssh_logs.empty:
-                # Group by source IP and count failures/attempts
-                for src_ip, group in ssh_logs.groupby("source_ip"):
-                    if pd.isna(src_ip) or str(src_ip).strip() == "":
-                        continue
-                    src_ip = str(src_ip)
-                    
-                    # Count failed logins
-                    failed = group[group["status"].astype(str).str.lower().str.contains("fail|denied", na=False)]
-                    total = len(group)
-                    
-                    if total >= 5 and len(failed) >= 3:  # at least 3 failures in 5+ attempts
-                        failure_rate = len(failed) / total
-                        if failure_rate >= 0.4:  # 40%+ failure rate
-                            ctx = {
-                                "user": None,
-                                "group": None,
-                                "behavior": {"type": "ssh_bruteforce", "source_ip": src_ip, "attempts": total, "failures": len(failed)},
-                                "time": None,
-                                "baseline": {"expected_failure_rate": 0.1},
-                                "extras": {"reason": f"High SSH login failure rate from {src_ip}"},
-                            }
-                            alerts.append({
-                                "type": "ssh_bruteforce_detected",
-                                "subject": src_ip,
-                                "severity": "CRITICAL" if failure_rate > 0.7 else "WARNING",
-                                "score": min(failure_rate * 10, 10.0),
-                                "text": f"SSH brute force detected from IP {src_ip}: {len(failed)}/{total} failed attempts ({failure_rate:.1%} failure rate).",
-                                "evidence": {"source_ip": src_ip, "total_attempts": int(total), "failed_attempts": int(len(failed)), "failure_rate": float(failure_rate)},
-                                "prompt_ctx": ctx,
-                            })
-        except Exception:
-            pass
-    
-    # 0C) Data Exfiltration Detection - detect large file transfers
-    if "message" in df.columns:
-        try:
-            detected_transfers = {}  # (username, bytes) -> bool to avoid duplicates
-            
-            for idx, row in df.iterrows():
-                msg = str(row.get("message", ""))  # Keep case for better matching
-                hostname = str(row.get("hostname", "(unknown)")).strip()
-                timestamp = row.get("timestamp")
-                
-                # Pattern 1: scp format like "huydev -> 203.0.113.55:/tmp/huydev.tar.gz bytes=879328811 status=OK"
-                # Simplified: look for "bytes=XXXXXX" pattern after IP address
-                scp_match = None
-                bytes_val = 0
-                username = None
-                dest_ip = None
-                
-                bytes_match = re.search(r'bytes=(\d+)', msg)
-                if bytes_match and ' -> ' in msg:
-                    try:
-                        bytes_val = int(bytes_match.group(1))
-                        # Extract username and IP from pattern "user -> IP:"
-                        arrow_match = re.search(r'([a-zA-Z0-9_\-]+)\s*->\s+([0-9\.]+):', msg)
-                        if arrow_match:
-                            username = arrow_match.group(1)
-                            dest_ip = arrow_match.group(2)
-                            scp_match = True
-                    except Exception:
-                        pass
-                
-                if scp_match:
-                    # Flag any scp > 50MB (data exfiltration indicator)
-                    if bytes_val and bytes_val > 50_000_000:
-                        key = (username, "scp", bytes_val)
-                        if key not in detected_transfers:
-                            detected_transfers[key] = True
-                            
-                            ctx = {
-                                "user": username,
-                                "group": None,
-                                "behavior": {"type": "data_exfiltration", "bytes": bytes_val, "destination": dest_ip},
-                                "time": _fmt_local_vn(timestamp),
-                                "baseline": {"max_normal_transfer": "50MB"},
-                                "extras": {"reason": f"Large SCP transfer detected: {bytes_val / 1_000_000:.1f}MB to {dest_ip}"},
-                            }
-                            alerts.append({
-                                "type": "data_exfiltration_detected",
-                                "subject": username,
-                                "severity": "CRITICAL",
-                                "score": min((bytes_val / 100_000_000) * 9.5, 10.0),
-                                "text": f"[CRITICAL] DATA EXFILTRATION: User '{username}' transferred {bytes_val / 1_000_000:.1f}MB to {dest_ip}",
-                                "evidence": {"user": username, "bytes": int(bytes_val), "destination": dest_ip, "method": "scp", "hostname": hostname},
-                                "prompt_ctx": ctx,
-                            })
-                
-                # Pattern 2: NETFILTER_PKT for large network transfers
-                netfilter_match = re.search(r'NETFILTER_PKT\s+len=(\d+)\s+dst=([0-9\.]+)', msg)
-                if netfilter_match:
-                    bytes_val = int(netfilter_match.group(1))
-                    dest_ip = netfilter_match.group(2)
-                    # Flag if > 50MB
-                    if bytes_val > 50_000_000:
-                        username = str(row.get("username", hostname)).strip()
-                        if not username:
-                            username = hostname
-                        
-                        key = (username, "netfilter", bytes_val, dest_ip)
-                        if key not in detected_transfers:
-                            detected_transfers[key] = True
-                            
-                            ctx = {
-                                "user": username,
-                                "group": None,
-                                "behavior": {"type": "data_exfiltration", "bytes": bytes_val, "destination": dest_ip},
-                                "time": _fmt_local_vn(timestamp),
-                                "baseline": {"max_normal_transfer": "50MB"},
-                                "extras": {"reason": f"Large network transfer detected: {bytes_val / 1_000_000:.1f}MB"},
-                            }
-                            alerts.append({
-                                "type": "data_exfiltration_detected",
-                                "subject": hostname,
-                                "severity": "CRITICAL",
-                                "score": min((bytes_val / 100_000_000) * 9.0, 10.0),
-                                "text": f"[CRITICAL] DATA EXFILTRATION: Large network transfer {bytes_val / 1_000_000:.1f}MB from {hostname} to {dest_ip}",
-                                "evidence": {"bytes": int(bytes_val), "destination": dest_ip, "source_host": hostname, "method": "network"},
-                                "prompt_ctx": ctx,
-                            })
-        except Exception as e:
-            import sys
-            print(f"[DEBUG] Data exfiltration detection error: {e}", file=sys.stderr)
-            pass
-    
-    # 0D) Privilege Escalation Detection - detect suspicious sudo usage
-    if "action" in df.columns or "message" in df.columns:
-        try:
-            priv_escalation_patterns = [
-                (r"sudo.*usermod.*sudo", "add_sudo_user", 8.0),
-                (r"chmod\s+u\+s\s+/bin/bash", "suid_bash", 9.0),
-                (r"visudo.*-f\s+/etc/sudoers", "sudoers_edit", 8.5),
-                (r"chown\s+root.*bash", "bash_ownership_change", 8.0),
-            ]
-            
-            detected_privesc = {}  # (username, pattern) -> bool to avoid duplicates
-            
-            for idx, row in df.iterrows():
-                msg = str(row.get("message", "")).lower()
-                username = str(row.get("username", "(unknown)")).strip()
-                if not username:
-                    username = "(unknown)"
-                timestamp = row.get("timestamp")
-                
-                for pattern, pattern_name, score in priv_escalation_patterns:
-                    if re.search(pattern, msg, re.IGNORECASE):
-                        key = (username, pattern_name)
-                        if key in detected_privesc:
-                            continue
-                        detected_privesc[key] = True
-                        
-                        ctx = {
-                            "user": username,
-                            "group": None,
-                            "behavior": {"type": "privilege_escalation", "method": pattern_name},
-                            "time": _fmt_local_vn(timestamp),
-                            "baseline": {},
-                            "extras": {"reason": f"Privilege escalation attempt detected"},
-                        }
-                        alerts.append({
-                            "type": "privilege_escalation_detected",
-                            "subject": username,
-                            "severity": "CRITICAL",
-                            "score": score,
-                            "text": f"Privilege escalation by {username}: {msg[:200]}",
-                            "evidence": {"method": pattern_name, "message": msg[:300]},
-                            "prompt_ctx": ctx,
-                        })
-        except Exception:
-            pass
-    
     # -1) Detect PERSISTENCE TECHNIQUES (before baseline detection)
     # These are high-confidence indicators of compromise
     if "message" in df.columns and "username" in df.columns:
         try:
+            import re
+            
             # Persistence patterns: crontab modification, reverse shells, rc.local, SSH key injection, etc
             persistence_patterns = [
                 {
@@ -1553,6 +314,8 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
     # 0.5) Detect suspicious data access patterns using BASELINE comparison (NOT heuristic)
     if "message" in df.columns and "username" in df.columns:
         try:
+            import re
+            
             # Extract current data access features per user (same as baseline extraction)
             current_user_activity = {}  # user -> {db_queries, suspicious_ops, timestamps}
             
@@ -1695,11 +458,10 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                         final_score = max(final_score, 4.0)
                         
                         # Map score to severity (UNIFIED)
-                        # Note: Use only CRITICAL, WARNING, INFO for consistency with frontend
                         if final_score >= 8.0:
                             severity = "CRITICAL"
                         elif final_score >= 6.0:
-                            severity = "CRITICAL"  # HIGH mapped to CRITICAL for consistency
+                            severity = "HIGH"
                         elif final_score >= 4.0:
                             severity = "WARNING"
                         else:
@@ -1713,12 +475,12 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                             "text": f"Phát hiện hoạt động truy cập dữ liệu bất thường từ user '{display_user}': {'; '.join(reason_parts)}",
                             "evidence": {
                                 "user": display_user,
-                                "db_queries": int(current_queries),
-                                "db_queries_baseline": float(db_queries_mean),
-                                "suspicious_ops": int(current_suspicious),
-                                "suspicious_ops_baseline": float(suspicious_ops_mean),
-                                "z_queries": float(z_queries),
-                                "z_suspicious": float(z_suspicious),
+                                "db_queries": current_queries,
+                                "db_queries_baseline": db_queries_mean,
+                                "suspicious_ops": current_suspicious,
+                                "suspicious_ops_baseline": suspicious_ops_mean,
+                                "z_queries": z_queries,
+                                "z_suspicious": z_suspicious,
                                 "anomaly_score": anomaly_score,
                                 "final_score": final_score,
                             },
@@ -1755,93 +517,9 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                     "severity": "WARNING",
                     "score": 4.0,
                     "text": f"User mới {nu} xuất hiện với {user_events} sự kiện, chưa có trong baseline.",
-                    "evidence": {"events": int(user_events)},
+                    "evidence": {"events": user_events},
                     "prompt_ctx": ctx,
                 })
-
-    # 0F) Web Authentication Failures - detect multiple failed HTTP auth attempts
-    if "http_status" in df.columns and "action" in df.columns and "username" in df.columns:
-        try:
-            # HTTP auth failures: 401, 403
-            http_logs = df[df.get("action", pd.Series(index=df.index)).astype(str).str.contains("access|get|post|put|delete", case=False, na=False)]
-            if not http_logs.empty:
-                for username, group in http_logs.groupby("username"):
-                    username = str(username).strip()
-                    if not username or username in ["(unknown)", "nan", ""]:
-                        continue
-                    
-                    http_status = pd.to_numeric(group["http_status"], errors="coerce")
-                    auth_failures = http_status[http_status.isin([401, 403])]
-                    total_requests = len(group)
-                    
-                    if total_requests >= 5 and len(auth_failures) >= 3:
-                        failure_rate = len(auth_failures) / total_requests
-                        if failure_rate >= 0.3:  # 30%+ auth failure rate
-                            ctx = {
-                                "user": username,
-                                "group": None,
-                                "behavior": {"type": "web_auth_failure", "failures": len(auth_failures), "total": total_requests},
-                                "time": None,
-                                "baseline": {"expected_auth_failure_rate": 0.05},
-                                "extras": {"reason": f"Elevated HTTP authentication failure rate"},
-                            }
-                            alerts.append({
-                                "type": "web_auth_failure_spike",
-                                "subject": username,
-                                "severity": "WARNING" if failure_rate < 0.5 else "CRITICAL",
-                                "score": min(failure_rate * 8, 10.0),
-                                "text": f"User {username} experienced {len(auth_failures)}/{total_requests} HTTP auth failures ({failure_rate:.1%} rate).",
-                                "evidence": {"failures": int(len(auth_failures)), "total_requests": int(total_requests), "failure_rate": float(failure_rate)},
-                                "prompt_ctx": ctx,
-                            })
-        except Exception:
-            pass
-    
-    # 0G) Sensitive Database Access Detection - detect abnormal database operations
-    if "message" in df.columns and "username" in df.columns:
-        try:
-            db_access_patterns = [
-                (r"pg_dump|mysqldump", "database_dump", 7.0),
-                (r"SELECT\s+\*\s+FROM\s+\w*user", "user_table_access", 6.0),
-                (r"ALTER\s+ROLE|ALTER\s+USER", "user_modification", 7.0),
-                (r"DROP\s+TABLE|DROP\s+DATABASE", "destructive_operation", 9.0),
-            ]
-            
-            db_alerts = {}  # (username, pattern) -> bool
-            
-            for idx, row in df.iterrows():
-                msg = str(row.get("message", "")).lower()
-                username = str(row.get("username", "(unknown)")).strip()
-                if not username:
-                    username = "(unknown)"
-                timestamp = row.get("timestamp")
-                
-                for pattern, pattern_name, score in db_access_patterns:
-                    if re.search(pattern, msg, re.IGNORECASE):
-                        key = (username, pattern_name)
-                        if key in db_alerts:
-                            continue
-                        db_alerts[key] = True
-                        
-                        ctx = {
-                            "user": username,
-                            "group": None,
-                            "behavior": {"type": "database_access", "operation": pattern_name},
-                            "time": _fmt_local_vn(timestamp),
-                            "baseline": {},
-                            "extras": {"reason": f"Sensitive database operation detected"},
-                        }
-                        alerts.append({
-                            "type": "sensitive_db_access_detected",
-                            "subject": username,
-                            "severity": "CRITICAL" if score >= 8 else "WARNING",
-                            "score": score,
-                            "text": f"Sensitive database operation by {username}: {msg[:200]}",
-                            "evidence": {"operation": pattern_name, "message": msg[:300]},
-                            "prompt_ctx": ctx,
-                        })
-        except Exception:
-            pass
 
     # 1) User download spike (Z-score against daily baseline if available)
     dl = _count_user_downloads(df)
@@ -2053,7 +731,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                             ctx = {
                                 "user": str(username[0]) if len(username) > 0 else None,
                                 "group": None,
-                                "behavior": {"type": "blocked_actions_spike", "ratio": float(blocked_ratio), "count": int(blocked_count), "source": entity},
+                                "behavior": {"type": "blocked_actions_spike", "ratio": blocked_ratio, "count": blocked_count, "source": entity},
                                 "time": None,
                                 "baseline": {"expected_ratio": 0.2},
                                 "extras": {"reason": f"High ratio of blocked/denied actions from {entity}"},
@@ -2065,7 +743,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                                 "severity": "CRITICAL" if blocked_ratio > 0.8 else "WARNING",
                                 "score": min(blocked_ratio * 10, 10.0),
                                 "text": f"Phát hiện {blocked_count}/{total_count} hành động bị chặn ({blocked_ratio:.1%}) từ {primary_key}={entity}. {f'Chi tiết: {context_info}' if context_info else ''} Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
-                                "evidence": {"blocked_count": int(blocked_count), "total_count": int(total_count), "ratio": float(blocked_ratio), "source": entity, "context": context_info},
+                                "evidence": {"blocked_count": blocked_count, "total_count": total_count, "ratio": float(blocked_ratio), "source": entity, "context": context_info},
                                 "prompt_ctx": ctx,
                             })
             else:
@@ -2081,7 +759,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                         ctx = {
                             "user": None,
                             "group": None,
-                            "behavior": {"type": "blocked_actions_spike", "ratio": float(blocked_ratio), "count": int(blocked_count)},
+                            "behavior": {"type": "blocked_actions_spike", "ratio": blocked_ratio, "count": blocked_count},
                             "time": None,
                             "baseline": {"expected_ratio": 0.2},
                             "extras": {"reason": f"High ratio of blocked/denied actions"},
@@ -2092,7 +770,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                             "severity": "CRITICAL" if blocked_ratio > 0.8 else "WARNING",
                             "score": min(blocked_ratio * 10, 10.0),
                             "text": f"Phát hiện {blocked_count}/{total_count} hành động bị chặn ({blocked_ratio:.1%}). Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
-                            "evidence": {"blocked_count": int(blocked_count), "total_count": int(total_count), "ratio": float(blocked_ratio)},
+                            "evidence": {"blocked_count": blocked_count, "total_count": total_count, "ratio": float(blocked_ratio)},
                             "prompt_ctx": ctx,
                         })
         except Exception:
@@ -2217,7 +895,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                         "severity": "WARNING" if len(u_foreign) < 5 else "CRITICAL",
                         "score": 4.0 + min(len(u_foreign) * 0.2, 2.0),
                         "text": f"User {u} truy cập từ quốc gia nước ngoài: {', '.join(countries)} ({len(u_foreign)} sự kiện).",
-                        "evidence": {"countries": list(countries), "events": int(len(u_foreign))},
+                        "evidence": {"countries": list(countries), "events": len(u_foreign)},
                         "prompt_ctx": ctx,
                     })
 
@@ -2256,7 +934,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                             "severity": "WARNING" if len(u_outside) < 10 else "CRITICAL",
                             "score": 4.0 + min(len(u_outside) * 0.1, 2.0),
                             "text": f"User {u} truy cập ngoài giờ làm việc ({len(u_outside)} sự kiện vào lúc {sorted([int(h) for h in hours])}h).",
-                            "evidence": {"hours": sorted([int(h) for h in hours]), "events": int(len(u_outside))},
+                            "evidence": {"hours": sorted([int(h) for h in hours]), "events": len(u_outside)},
                             "prompt_ctx": ctx,
                         })
         except Exception:
@@ -2300,48 +978,6 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str) -> List[Dict[st
                         "evidence": {"source_ip": ip, "geoip_country": ctry},
                         "prompt_ctx": ctx,
                     })
-
-    # NEW: DHCP-specific attack detection (when DHCP logs detected)
-    if "program" in df.columns and df["program"].eq("dhcpd").any():
-        # Add scope conflict detection
-        dhcp_scope_alerts = _detect_dhcp_scope_conflicts(df)
-        alerts.extend(dhcp_scope_alerts)
-        
-        # Add rogue server / NAK storm detection
-        dhcp_rogue_alerts = _detect_dhcp_rogue_server(df)
-        alerts.extend(dhcp_rogue_alerts)
-        
-        # Add device user mismatch detection
-        dhcp_mismatch_alerts = _detect_dhcp_user_device_mismatch(df)
-        alerts.extend(dhcp_mismatch_alerts)
-    
-    # NEW: DNS-specific attack detection (when DNS/dnsmasq logs detected)
-    if "program" in df.columns and df["program"].eq("dnsmasq").any():
-        dns_alerts = _detect_dns_anomalies(df)
-        alerts.extend(dns_alerts)
-    
-    
-    # NEW: Firewall-specific attack detection (firewall OR UFW logs)
-    # The detector now checks internally for both program=='firewall' and UFW patterns
-    fw_alerts = _detect_firewall_anomalies(df)
-    alerts.extend(fw_alerts)
-    
-    # NEW: Apache/Web-specific attack detection (when apache logs detected)
-    # Detector checks for Apache-specific columns (http_status, path, vhost) internally
-    apache_alerts = _detect_apache_anomalies(df)
-    alerts.extend(apache_alerts)
-    
-    # NEW: Network link flap detection (kernel Link Up events on multiple servers)
-    network_alerts = _detect_network_link_flap(df)
-    alerts.extend(network_alerts)
-    
-    # NEW: Cron job overlap detection (same script running multiple times)
-    cron_alerts = _detect_cron_job_overlap(df)
-    alerts.extend(cron_alerts)
-    
-    # NEW: SSH successful login burst detection (potential lateral movement)
-    ssh_burst_alerts = _detect_ssh_login_burst(df)
-    alerts.extend(ssh_burst_alerts)
 
     return alerts
 
