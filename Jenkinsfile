@@ -51,12 +51,16 @@ pipeline {
                     echo '--- Generating .env file ---'
                     withCredentials([
                         string(credentialsId: 'openai-api-key', variable: 'ENV_OPENAI_KEY'),
-                        string(credentialsId: 'n8n-webhook-url', variable: 'ENV_N8N_URL')
+                        string(credentialsId: 'n8n-webhook-url', variable: 'ENV_N8N_URL'),
+                        string(credentialsId: 'mongodb-atlas-uri', variable: 'ENV_MONGO_URI'),
+                        string(credentialsId: 'mongodb-db-name', variable: 'ENV_MONGO_DB_NAME')
                     ]) {
                         sh """
                             echo "FLASK_ENV=production" > ./backend/.env
                             echo "OPENAI_API_KEY=${ENV_OPENAI_KEY}" >> ./backend/.env
                             echo "N8N_WEBHOOK_URL=${ENV_N8N_URL}" >> ./backend/.env
+                            echo "MONGO_URI=${ENV_MONGO_URI}" >> ./backend/.env
+                            echo "MONGO_DB_NAME=${ENV_MONGO_DB_NAME}" >> ./backend/.env
                             echo "SAVE_OUTPUTS=false" >> ./backend/.env
                             echo "OUTPUT_DIR=./outputs" >> ./backend/.env
                         """
