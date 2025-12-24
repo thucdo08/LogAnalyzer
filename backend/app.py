@@ -257,10 +257,10 @@ def anomaly_raw():
                 if log_type != "generic":
                     break
         
-        # Load baselines from common baselines folder (all log types share same files)
+        # Load baselines from MongoDB (PRIMARY) or config/baselines/ (FALLBACK)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
         print(f"Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
-        alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
+        alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir, log_type=log_type)
 
         # Filter alerts by min_score (default 3.5 to reduce noise)
         min_score = float(request.form.get("min_score", "3.5"))
@@ -527,10 +527,10 @@ def analyze():
                 if log_type != "generic":
                     break
         
-        # Load baselines from common baselines folder (all log types share same files)
+        # Load baselines from MongoDB (PRIMARY) or config/baselines/ (FALLBACK)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
         print(f"  → Log type: {log_type}, baselines_dir={base_dir}")
-        all_alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
+        all_alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir, log_type=log_type)
         print(f"  → Tổng cảnh báo thô: {len(all_alerts)}")
 
         # Lọc theo min_score
