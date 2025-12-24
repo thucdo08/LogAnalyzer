@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime
 import pandas as pd
+import pickle
+import base64
 
 load_dotenv()
 
@@ -24,6 +26,11 @@ global_stats_col = db["global_stats"]
 group_members_col = db["group_members"]      # Lưu: {group_name: {users: [...], source_ips: [...], hosts: [...]}}
 user_to_group_col = db["user_to_group"]      # Lưu: {username: group_name}
 device_to_group_col = db["device_to_group"]  # Lưu: {device_id: group_name}
+
+# Model collections (Isolation Forest)
+user_models_col = db["user_models"]
+device_models_col = db["device_models"]
+group_models_col = db["group_models"]
 
 
 # ===================== BASELINE OPERATIONS =====================
@@ -306,4 +313,150 @@ def load_device_to_group(log_type: str = "generic") -> dict:
         
         return {r.get("device"): r.get("group") for r in records if r.get("device")}
     except Exception:
+        return {}
+
+
+# ===================== MODEL OPERATIONS (Isolation Forest) =====================
+
+def save_user_models(user_models: dict, log_type: str = "generic"):
+    """
+    Lưu user models (EntityModel dict) vào MongoDB dưới dạng binary.
+    Format: {entity_name: EntityModel}
+    """
+    if not user_models or not isinstance(user_models, dict):
+        return
+    
+    try:
+        # Serialize models to base64
+        models_bytes = pickle.dumps(user_models)
+        models_b64 = base64.b64encode(models_bytes).decode('utf-8')
+        
+        record = {
+            "log_type": log_type,
+            "updated_at": datetime.utcnow(),
+            "models": models_b64,
+            "count": len(user_models)
+        }
+        
+        user_models_col.update_one(
+            {"log_type": log_type},
+            {"$set": record},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"[MONGO] Error saving user models: {e}")
+
+
+def save_device_models(device_models: dict, log_type: str = "generic"):
+    """
+    Lưu device models vào MongoDB dưới dạng binary.
+    """
+    if not device_models or not isinstance(device_models, dict):
+        return
+    
+    try:
+        models_bytes = pickle.dumps(device_models)
+        models_b64 = base64.b64encode(models_bytes).decode('utf-8')
+        
+        record = {
+            "log_type": log_type,
+            "updated_at": datetime.utcnow(),
+            "models": models_b64,
+            "count": len(device_models)
+        }
+        
+        device_models_col.update_one(
+            {"log_type": log_type},
+            {"$set": record},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"[MONGO] Error saving device models: {e}")
+
+
+def save_group_models(group_models: dict, log_type: str = "generic"):
+    """
+    Lưu group models vào MongoDB dưới dạng binary.
+    """
+    if not group_models or not isinstance(group_models, dict):
+        return
+    
+    try:
+        models_bytes = pickle.dumps(group_models)
+        models_b64 = base64.b64encode(models_bytes).decode('utf-8')
+        
+        record = {
+            "log_type": log_type,
+            "updated_at": datetime.utcnow(),
+            "models": models_b64,
+            "count": len(group_models)
+        }
+        
+        group_models_col.update_one(
+            {"log_type": log_type},
+            {"$set": record},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"[MONGO] Error saving group models: {e}")
+
+
+def load_user_models(log_type: str = "generic") -> dict:
+    """
+    Lấy user models từ MongoDB theo log_type.
+    Returns: {entity_name: EntityModel} hoặc {} nếu không tìm thấy
+    """
+    try:
+        record = user_models_col.find_one({"log_type": log_type})
+        if not record:
+            return {}
+        
+        models_b64 = record.get("models")
+        if not models_b64:
+            return {}
+        
+        models_bytes = base64.b64decode(models_b64)
+        return pickle.loads(models_bytes)
+    except Exception as e:
+        print(f"[MONGO] Error loading user models: {e}")
+        return {}
+
+
+def load_device_models(log_type: str = "generic") -> dict:
+    """
+    Lấy device models từ MongoDB theo log_type.
+    """
+    try:
+        record = device_models_col.find_one({"log_type": log_type})
+        if not record:
+            return {}
+        
+        models_b64 = record.get("models")
+        if not models_b64:
+            return {}
+        
+        models_bytes = base64.b64decode(models_b64)
+        return pickle.loads(models_bytes)
+    except Exception as e:
+        print(f"[MONGO] Error loading device models: {e}")
+        return {}
+
+
+def load_group_models(log_type: str = "generic") -> dict:
+    """
+    Lấy group models từ MongoDB theo log_type.
+    """
+    try:
+        record = group_models_col.find_one({"log_type": log_type})
+        if not record:
+            return {}
+        
+        models_b64 = record.get("models")
+        if not models_b64:
+            return {}
+        
+        models_bytes = base64.b64decode(models_b64)
+        return pickle.loads(models_bytes)
+    except Exception as e:
+        print(f"[MONGO] Error loading group models: {e}")
         return {}

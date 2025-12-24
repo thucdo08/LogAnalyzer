@@ -210,9 +210,18 @@ def anomaly_raw():
 
         # 1) Ingest + normalize
         _, df_raw, _ = preprocess_any(f, filename=f.filename, start_iso=t_from, end_iso=t_to)
+        print(f"[DEBUG] After preprocess_any: df_raw shape={df_raw.shape}, columns={df_raw.columns.tolist() if hasattr(df_raw, 'columns') else 'N/A'}")
+        if df_raw.empty:
+            print(f"[WARNING] DataFrame is empty after preprocessing!")
+            return jsonify({
+                "ok": False,
+                "error": "File rỗng hoặc không thể phân tích được",
+                "details": f"File {f.filename} không chứa dữ liệu logs hợp lệ"
+            }), 400
 
         # 2) Reduce noise and enrich (to enable ip_scope/geoip)
         df_used = reduce_noise(df_raw, threshold=5)
+        print(f"[DEBUG] After reduce_noise: df_used shape={df_used.shape}")
         enrich_cfg = {
             "mask_pii": True,
             "geoip_mmdb": RULES.get("geoip_mmdb"),
@@ -259,12 +268,15 @@ def anomaly_raw():
         
         # Load baselines from MongoDB (PRIMARY) or config/baselines/ (FALLBACK)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
-        print(f"Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
+        print(f"[DEBUG] Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
+        print(f"[DEBUG] Calling generate_raw_anomalies with df_used shape={df_used.shape}")
         alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir, log_type=log_type)
+        print(f"[DEBUG] generate_raw_anomalies returned {len(alerts)} alerts")
 
         # Filter alerts by min_score (default 3.5 to reduce noise)
         min_score = float(request.form.get("min_score", "3.5"))
         alerts_filtered = [a for a in alerts if a.get("score", 0) >= min_score]
+        print(f"[DEBUG] After filtering by min_score={min_score}: {len(alerts_filtered)} alerts")
 
         # Ensure all alerts have valid severity (CRITICAL, WARNING, INFO)
         valid_severities = {"CRITICAL", "WARNING", "INFO"}
@@ -1172,7 +1184,8 @@ def baseline_train():
             )
             from services.database import (
                 save_user_stats, save_device_stats, save_group_stats, save_global_stats,
-                save_group_members, save_user_to_group, save_device_to_group
+                save_group_members, save_user_to_group, save_device_to_group,
+                save_user_models, save_device_models, save_group_models
             )
             import joblib
         except Exception as ie:
@@ -1252,7 +1265,13 @@ def baseline_train():
             save_user_to_group(members.get("user_to_group", {}), log_type=log_type)
             save_device_to_group(members.get("device_to_group", {}), log_type=log_type)
             
-            print(f"[MONGO] Successfully saved baselines to MongoDB")
+            # Save ML models to MongoDB
+            print(f"[MONGO] Saving ML models to MongoDB")
+            save_user_models(user_models, log_type=log_type)
+            save_device_models(device_models, log_type=log_type)
+            save_group_models(group_models, log_type=log_type)
+            
+            print(f"[MONGO] Successfully saved baselines and models to MongoDB")
             mongo_success = True
             
         except Exception as db_error:
@@ -1657,6 +1676,152 @@ def send_zalo():
         return jsonify({
             'status': 'error',
             'message': str(e)
+        }), 500
+
+
+@app.route('/api/health/mongodb', methods=['GET'])
+def health_mongodb():
+    """
+    Kiểm tra kết nối MongoDB Atlas.
+    Phục vụ để xác nhận MongoDB đã được cấu hình đúng.
+    
+    Response:
+    {
+        "status": "connected|disconnected",
+        "mongo_uri": "mongodb+srv://...",
+        "db_name": "log_analysis",
+        "collections": {
+            "device_stats": <count>,
+            "user_stats": <count>,
+            "group_stats": <count>,
+            "global_stats": <count>,
+            "device_to_group": <count>,
+            "user_to_group": <count>,
+            "group_members": <count>
+        },
+        "error": "<error message if any>"
+    }
+    """
+    try:
+        from services.database import get_db
+        
+        db = get_db()
+        
+        # Test connection by running a simple command
+        db.command('ping')
+        
+        mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+        db_name = os.getenv("MONGO_DB_NAME", "log_analysis")
+        
+        # Count documents in each collection
+        collections_info = {}
+        collection_names = [
+            "device_stats", "user_stats", "group_stats", "global_stats",
+            "device_to_group", "user_to_group", "group_members"
+        ]
+        
+        for col_name in collection_names:
+            try:
+                count = db[col_name].count_documents({})
+                collections_info[col_name] = count
+            except Exception as e:
+                collections_info[col_name] = f"Error: {str(e)}"
+        
+        return jsonify({
+            "status": "connected",
+            "mongo_uri": mongo_uri.replace(mongo_uri.split('@')[0].split(':')[1].split(':')[2], '****') if '@' in mongo_uri else mongo_uri,
+            "db_name": db_name,
+            "collections": collections_info,
+            "message": "MongoDB Atlas connection successful!"
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        print(f"MongoDB health check failed: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            "status": "disconnected",
+            "error": str(e),
+            "message": "Không thể kết nối tới MongoDB. Kiểm tra MONGO_URI và MONGO_DB_NAME trong .env file"
+        }), 500
+
+
+@app.route('/api/baseline/sync', methods=['POST'])
+def sync_baseline_from_mongodb():
+    """
+    Endpoint để lấy dữ liệu baseline từ MongoDB và trả về.
+    Dùng để xác nhận rằng hệ thống đang sử dụng MongoDB baseline.
+    
+    Query parameters:
+    - log_type: loại log (default: "generic", ví dụ: "linuxsyslog", "edr", "windows_eventlog")
+    
+    Response:
+    {
+        "ok": true,
+        "log_type": "linuxsyslog",
+        "source": "mongodb",
+        "baseline": {
+            "device_stats": [...],
+            "user_stats": [...],
+            "group_stats": [...],
+            "global_stats": {...},
+            "device_to_group": {...},
+            "user_to_group": {...},
+            "group_members": {...}
+        }
+    }
+    """
+    try:
+        log_type = request.args.get("log_type", "generic")
+        
+        from services.database import (
+            load_device_stats, load_user_stats, load_group_stats, 
+            load_global_stats, load_device_to_group, load_user_to_group,
+            load_group_members
+        )
+        
+        # Load all baselines
+        device_stats = load_device_stats(log_type=log_type)
+        user_stats = load_user_stats(log_type=log_type)
+        group_stats = load_group_stats(log_type=log_type)
+        global_stats = load_global_stats(log_type=log_type)
+        device_to_group = load_device_to_group(log_type=log_type)
+        user_to_group = load_user_to_group(log_type=log_type)
+        group_members = load_group_members(log_type=log_type)
+        
+        baseline_data = {
+            "device_stats": _json_safe(device_stats.to_dict(orient="records") if not device_stats.empty else []),
+            "user_stats": _json_safe(user_stats.to_dict(orient="records") if not user_stats.empty else []),
+            "group_stats": _json_safe(group_stats.to_dict(orient="records") if not group_stats.empty else []),
+            "global_stats": _json_safe(global_stats),
+            "device_to_group": device_to_group,
+            "user_to_group": user_to_group,
+            "group_members": group_members
+        }
+        
+        return jsonify({
+            "ok": True,
+            "log_type": log_type,
+            "source": "mongodb",
+            "baseline": baseline_data,
+            "summary": {
+                "device_stats_count": len(device_stats),
+                "user_stats_count": len(user_stats),
+                "group_stats_count": len(group_stats),
+                "devices_mapped": len(device_to_group),
+                "users_mapped": len(user_to_group),
+                "groups": len(group_members)
+            }
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        print(f"Sync baseline error: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "message": "Lỗi khi lấy baseline từ MongoDB"
         }), 500
 
 

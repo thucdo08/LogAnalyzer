@@ -31,39 +31,54 @@ def _load_json_df(path: str) -> pd.DataFrame:
 
 def _load_baseline_tables(base_dir: str, log_type: str = "generic") -> Dict[str, Any]:
     """
-    Load baselines từ MongoDB (PRIMARY) hoặc fallback to FILE SYSTEM.
-    MongoDB is now primary storage for better scalability.
-    Returns dict with user_stats, device_stats, group_stats, global_stats.
+    Load previously trained baselines từ MongoDB (PRIMARY) hoặc config/baselines/* (FALLBACK).
+    
+    Args:
+        base_dir: Path to config/baselines (for fallback)
+        log_type: Loại log (generic, linuxsyslog, edr, etc.)
+    
+    Returns:
+        dict với keys: user_stats, device_stats, group_stats, global_stats, user_models, device_models, group_models
     """
     out: Dict[str, Any] = {}
     
-    # === Try MongoDB First (PRIMARY) ===
+    # === TRY MONGODB FIRST ===
     try:
         from services.database import (
-            load_user_stats, load_device_stats, load_group_stats, load_global_stats
+            load_user_stats, load_device_stats, load_group_stats, load_global_stats,
+            load_user_models, load_device_models, load_group_models
         )
         
-        user_stats_mongo = load_user_stats(log_type=log_type)
-        device_stats_mongo = load_device_stats(log_type=log_type)
-        group_stats_mongo = load_group_stats(log_type=log_type)
-        global_stats_mongo = load_global_stats(log_type=log_type)
+        print(f"[ANOMALY] Loading baselines from MongoDB for log_type={log_type}")
+        out["user_stats"] = load_user_stats(log_type=log_type)
+        out["device_stats"] = load_device_stats(log_type=log_type)
+        out["group_stats"] = load_group_stats(log_type=log_type)
+        out["global_stats"] = load_global_stats(log_type=log_type)
+        out["user_models"] = load_user_models(log_type=log_type)
+        out["device_models"] = load_device_models(log_type=log_type)
+        out["group_models"] = load_group_models(log_type=log_type)
         
-        # Nếu MongoDB có dữ liệu, dùng nó
-        if not user_stats_mongo.empty or not device_stats_mongo.empty or global_stats_mongo:
-            print(f"[✓ MONGO] Loaded baselines from MongoDB (log_type={log_type})")
-            out["user_stats"] = user_stats_mongo
-            out["device_stats"] = device_stats_mongo
-            out["group_stats"] = group_stats_mongo
-            out["global_stats"] = global_stats_mongo
+        # Check if MongoDB has data
+        has_data = (not out["user_stats"].empty or 
+                   not out["device_stats"].empty or 
+                   bool(out["global_stats"]) or
+                   bool(out["user_models"]))
+        
+        if has_data:
+            print(f"[ANOMALY] ✓ Successfully loaded baselines from MongoDB")
             return out
-    except Exception as e:
-        print(f"[⚠ MONGO] Failed to load from MongoDB: {e}")
+        else:
+            print(f"[ANOMALY] ⚠ MongoDB empty, falling back to file-based baselines")
     
-    # === Fallback to File System (SECONDARY) ===
-    print(f"[📁 FILE] Falling back to file-based baselines from {base_dir}")
+    except Exception as e:
+        print(f"[ANOMALY] ⚠ Failed to load from MongoDB: {e}, falling back to files")
+    
+    # === FALLBACK: LOAD FROM FILES ===
+    print(f"[ANOMALY] Loading baselines from files: {base_dir}")
     out["user_stats"] = _load_json_df(os.path.join(base_dir, "user_stats.json"))
     out["device_stats"] = _load_json_df(os.path.join(base_dir, "device_stats.json"))
     out["group_stats"] = _load_json_df(os.path.join(base_dir, "group_stats.json"))
+    
     # global baseline is a list of snapshots; take last if exists
     gb_path = os.path.join(base_dir, "global_baseline.json")
     try:
@@ -80,6 +95,28 @@ def _load_baseline_tables(base_dir: str, log_type: str = "generic") -> Dict[str,
             out["global_stats"] = {}
     except Exception:
         out["global_stats"] = {}
+    
+    # Load models from files
+    import joblib
+    try:
+        um_path = os.path.join(base_dir, "user_models.joblib")
+        out["user_models"] = joblib.load(um_path) if os.path.exists(um_path) else {}
+    except Exception:
+        out["user_models"] = {}
+    
+    try:
+        dm_path = os.path.join(base_dir, "device_models.joblib")
+        out["device_models"] = joblib.load(dm_path) if os.path.exists(dm_path) else {}
+    except Exception:
+        out["device_models"] = {}
+    
+    try:
+        gm_path = os.path.join(base_dir, "group_models.joblib")
+        out["group_models"] = joblib.load(gm_path) if os.path.exists(gm_path) else {}
+    except Exception:
+        out["group_models"] = {}
+    
+    print(f"[ANOMALY] ✓ Loaded baselines from files")
     return out
 
 
@@ -1408,11 +1445,14 @@ def _detect_network_link_flap(df: pd.DataFrame) -> List[Dict[str, Any]]:
             
             alert_text = f"Network link flap detected: eth0 Link Up on {unique_servers} servers ({total_events} events)"
             
+            # Calculate score first, then derive severity from score
+            link_flap_score = min(8.0 + (unique_servers / 10), 10.0)
+            
             alerts.append({
                 "type": "network_link_flap",
                 "subject": "Network Infrastructure",
-                "severity": "CRITICAL" if unique_servers >= 15 else "WARNING",
-                "score": min(8.0 + (unique_servers / 10), 10.0),
+                "severity": scoring.get_severity(link_flap_score),  # Use unified scoring
+                "score": link_flap_score,
                 "text": alert_text,
                 "evidence": {"unique_servers": int(unique_servers), "total_events": int(total_events), "affected_servers": [str(s) for s in affected_servers]},
                 "prompt_ctx": {"behavior": {"type": "network_link_flap"}},
@@ -1443,11 +1483,15 @@ def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
             if execution_count >= 10 and unique_users >= 3:
                 host = group["host"].iloc[0] if "host" in group.columns else "unknown"
                 alert_text = f"Cron job overlap: script '{script}' executed {execution_count} times by {unique_users} users"
+                
+                # Calculate score first, then derive severity from score
+                cron_score = min(5.0 + (execution_count / 10), 8.0)
+                
                 alerts.append({
                     "type": "cron_job_overlap",
                     "subject": str(host),
-                    "severity": "WARNING",
-                    "score": min(5.0 + (execution_count / 10), 8.0),
+                    "severity": scoring.get_severity(cron_score),  # Use unified scoring
+                    "score": cron_score,
                     "text": alert_text,
                     "evidence": {"script": str(script), "execution_count": int(execution_count), "unique_users": int(unique_users), "users": [str(u) for u in users_list]},
                     "prompt_ctx": {"behavior": {"type": "cron_job_overlap"}},
@@ -1457,43 +1501,782 @@ def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
         print(f"[DEBUG] Cron overlap error: {e}", file=sys.stderr)
     return alerts
 
-def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Detect SSH successful login bursts (potential lateral movement)."""
+def _detect_privilege_escalation(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect privilege escalation - USER-CENTRIC detection.
+    
+    Detects non-admin users reloading/restarting system services (nginx, apache, mysql, etc.)
+    which indicates potential privilege abuse or account compromise.
+    """
     alerts = []
-    if "message" not in df.columns or "program" not in df.columns:
+    if "message" not in df.columns:
         return alerts
+    
     try:
-        ssh_logs = df[df["program"].astype(str).str.contains(r"sshd\[", case=False, na=False)].copy()
-        if len(ssh_logs) == 0:
-            return alerts
-        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted publickey", case=False, na=False)]
-        if len(successful_logins) == 0:
-            return alerts
-        login_count = len(successful_logins)
-        if login_count >= 30:
-            unique_hosts = successful_logins["host"].nunique() if "host" in successful_logins.columns else 0
-            affected_hosts = successful_logins["host"].unique().tolist()[:5] if "host" in successful_logins.columns else []
-            alert_text = f"SSH login burst: {login_count} successful logins to {unique_hosts} servers"
-            subject = f"CI/CD Infrastructure ({', '.join([str(h) for h in affected_hosts[:3]])})"
-            alerts.append({
-                "type": "ssh_login_burst",
-                "subject": subject,
-                "severity": "WARNING",
-                "score": min(5.0 + (login_count / 30), 8.0),
-                "text": alert_text,
-                "evidence": {"login_count": int(login_count), "unique_hosts": int(unique_hosts), "affected_hosts": [str(h) for h in affected_hosts]},
-                "prompt_ctx": {"behavior": {"type": "ssh_login_burst"}},
-            })
+        # Define ADMIN users who ARE allowed to reload services (whitelist approach)
+        # Anyone NOT in this list who reloads services is suspicious
+        admin_users = ["root", "admin", "sysadmin", "operator", "ops", "www-data", "nginx", "apache", "mysql", "postgres"]
+        
+        # Track detected users to avoid duplicates for same user/host combo
+        detected_privesc = set()
+        
+        for _, row in df.iterrows():
+            msg = str(row.get("message", ""))
+            host = str(row.get("host", "unknown"))
+            
+            # Check for service reload pattern with "requested by" user
+            requested_match = re.search(r"Reload(ing)?\s+(\w+)\s+server.*requested\s+by\s+(\w+)", msg, re.IGNORECASE)
+            if requested_match:
+                service_name = requested_match.group(2)
+                username = requested_match.group(3)
+                
+                # Unique key to avoid duplicate alerts for same user+host+service
+                alert_key = (username, host, service_name)
+                if alert_key in detected_privesc:
+                    continue
+                detected_privesc.add(alert_key)
+                
+                # Check if user is NOT an admin (whitelist approach)
+                is_non_admin = username.lower() not in admin_users
+                
+                if is_non_admin:
+                    # This is suspicious - non-admin reloading system service
+                    priv_score = 8.5  # High score - privilege escalation
+                    
+                    alerts.append({
+                        "type": "privilege_escalation",
+                        "subject": username,  # USER-CENTRIC: subject is the USER
+                        "severity": scoring.get_severity(priv_score),
+                        "score": priv_score,
+                        "text": f"Privilege escalation detected: Non-admin user '{username}' reloaded {service_name} server on {host}.",
+                        "evidence": {
+                            "username": username,
+                            "service": service_name,
+                            "action": "reload",
+                            "host": host,
+                            "message": msg[:200],
+                        },
+                        "prompt_ctx": {
+                            "user": username,
+                            "group": None,
+                            "behavior": {"type": "privilege_escalation", "service": service_name, "action": "reload"},
+                            "time": None,
+                            "baseline": {"expected_role": "admin"},
+                            "extras": {"reason": "Non-admin users should not have access to reload system services"},
+                        },
+                    })
+            
+            # Also check for sudo/su commands
+            sudo_match = re.search(r"sudo:\s+(\w+)\s*:", msg, re.IGNORECASE)
+            if sudo_match:
+                username = sudo_match.group(1)
+                is_non_admin = any(pattern in username.lower() for pattern in non_admin_patterns)
+                
+                if is_non_admin:
+                    # Check for sensitive commands
+                    if re.search(r"(systemctl|service|reboot|shutdown|passwd|useradd|userdel|chmod|chown)", msg, re.IGNORECASE):
+                        priv_score = 9.0  # Very high - sudo with sensitive commands
+                        
+                        alerts.append({
+                            "type": "privilege_escalation",
+                            "subject": username,
+                            "severity": scoring.get_severity(priv_score),
+                            "score": priv_score,
+                            "text": f"Privilege escalation detected: Non-admin user '{username}' used sudo for sensitive operations.",
+                            "evidence": {
+                                "username": username,
+                                "action": "sudo_sensitive_command",
+                                "host": host,
+                                "message": msg[:200],
+                            },
+                            "prompt_ctx": {
+                                "user": username,
+                                "group": None,
+                                "behavior": {"type": "privilege_escalation", "action": "sudo"},
+                                "time": None,
+                                "baseline": {"expected_role": "admin"},
+                                "extras": {"reason": "Non-admin users using sudo for sensitive commands is highly suspicious"},
+                            },
+                        })
     except Exception as e:
         import sys
-        print(f"[DEBUG] SSH burst error: {e}", file=sys.stderr)
+        print(f"[DEBUG] Privilege escalation error: {e}", file=sys.stderr)
+    return alerts
+
+def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect SSH lateral movement - USER-CENTRIC detection.
+    
+    Creates per-user alerts for SSH logins from multiple IPs, indicating potential
+    lateral movement or account compromise.
+    """
+    alerts = []
+    if "message" not in df.columns:
+        return alerts
+    try:
+        import sys
+        
+        # Find SSH daemon logs - check both program column AND message content
+        ssh_logs = pd.DataFrame()
+        
+        if "program" in df.columns:
+            program_ssh = df[df["program"].astype(str).str.contains(r"sshd", case=False, na=False)].copy()
+            ssh_logs = pd.concat([ssh_logs, program_ssh], ignore_index=True)
+        
+        # Fallback: Check message directly for SSH patterns
+        message_ssh = df[df["message"].astype(str).str.contains(r"(sshd|Accepted\s+(publickey|password)\s+for)", case=False, regex=True, na=False)].copy()
+        ssh_logs = pd.concat([ssh_logs, message_ssh], ignore_index=True)
+        
+        # Remove duplicates
+        if not ssh_logs.empty:
+            ssh_logs = ssh_logs.drop_duplicates()
+        
+        if len(ssh_logs) == 0:
+            print(f"[DEBUG] SSH detection: No SSH logs found in {len(df)} rows", file=sys.stderr)
+            return alerts
+        
+        print(f"[DEBUG] SSH detection: Found {len(ssh_logs)} SSH log entries", file=sys.stderr)
+        
+        # Filter for successful logins (lateral movement indicator)
+        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted\s+(publickey|password)", case=False, regex=True, na=False)].copy()
+        if len(successful_logins) == 0:
+            print(f"[DEBUG] SSH detection: No 'Accepted publickey/password' found", file=sys.stderr)
+            return alerts
+        
+        print(f"[DEBUG] SSH detection: Found {len(successful_logins)} successful SSH logins", file=sys.stderr)
+        
+        # Extract username and source IP from message
+        # Pattern: "Accepted publickey for huydev from 10.141.10.67 port 12345"
+        successful_logins["ssh_user"] = successful_logins["message"].str.extract(r"Accepted\s+\S+\s+for\s+(\S+)\s+from", flags=re.IGNORECASE)[0]
+        successful_logins["ssh_source_ip"] = successful_logins["message"].str.extract(r"from\s+([0-9\.]+)\s+port", flags=re.IGNORECASE)[0]
+        
+        # Drop rows without extracted data
+        successful_logins = successful_logins[successful_logins["ssh_user"].notna() & successful_logins["ssh_source_ip"].notna()]
+        
+        if len(successful_logins) == 0:
+            print(f"[DEBUG] SSH detection: Failed to extract user/IP from messages", file=sys.stderr)
+            return alerts
+        
+        print(f"[DEBUG] SSH detection: Extracted {len(successful_logins)} logins with user+IP, users: {successful_logins['ssh_user'].unique().tolist()}", file=sys.stderr)
+        
+        # GROUP BY USER - Create per-user alerts (USER-CENTRIC approach)
+        for username, user_group in successful_logins.groupby("ssh_user"):
+            username = str(username).strip()
+            if not username or username in ["(unknown)", "nan", ""]:
+                continue
+            
+            login_count = len(user_group)
+            unique_source_ips = user_group["ssh_source_ip"].nunique()
+            source_ips_list = user_group["ssh_source_ip"].unique().tolist()[:10]
+            unique_hosts = user_group["host"].nunique() if "host" in user_group.columns else 0
+            target_hosts = user_group["host"].unique().tolist()[:5] if "host" in user_group.columns else []
+            
+            # ALERT ON ANY SSH LOGIN: Even 1 login can indicate lateral movement in attack scenarios
+            # Score increases with more logins/IPs
+            if login_count >= 1:
+                # Calculate score based on login patterns
+                # High score for many source IPs (potential botnet/compromised machines)
+                # Medium score for high login count from few IPs
+                lateral_score = 5.0
+                if unique_source_ips >= 5:
+                    lateral_score = 8.5  # Definitely suspicious - many source IPs
+                elif unique_source_ips >= 3:
+                    lateral_score = 7.0  # Suspicious
+                if login_count >= 10:
+                    lateral_score = min(lateral_score + 1.0, 10.0)
+                if unique_hosts >= 5:
+                    lateral_score = min(lateral_score + 1.0, 10.0)  # Targeting many hosts
+                
+                alerts.append({
+                    "type": "ssh_lateral_movement",
+                    "subject": username,  # USER-CENTRIC: subject is the USER
+                    "severity": scoring.get_severity(lateral_score),
+                    "score": lateral_score,
+                    "text": f"SSH lateral movement detected: User '{username}' logged in {login_count} times from {unique_source_ips} different source IPs to {unique_hosts} servers.",
+                    "evidence": {
+                        "username": username,
+                        "login_count": int(login_count),
+                        "unique_source_ips": int(unique_source_ips),
+                        "source_ips": source_ips_list,
+                        "target_hosts": target_hosts,
+                    },
+                    "prompt_ctx": {
+                        "user": username,
+                        "group": None,
+                        "behavior": {"type": "ssh_lateral_movement", "logins": login_count, "source_ips": unique_source_ips},
+                        "time": None,
+                        "baseline": {"expected_source_ips": 1},
+                        "extras": {"reason": "Multiple source IPs indicate lateral movement or compromised credentials"},
+                    },
+                })
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] SSH lateral movement error: {e}", file=sys.stderr)
+    return alerts
+
+# ==============================================================================
+# Context-Aware EDR Anomaly Detection (V2 - With Beaconing & Process Analysis)
+# ==============================================================================
+
+def _detect_edr_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = "generic") -> List[Dict[str, Any]]:
+    """
+    Context-Aware Risk Scoring for EDR/Sysmon Network Connection Logs (EventID=3).
+    
+    V2 Improvements:
+    - Module A: C2 Beaconing detection (periodic connections)
+    - Module B: Suspicious process execution (non-tech users + risky tools)
+    - Module C: Refined volume spike (absolute count based)
+    - Module D: Relaxed unauthorized access (only external admin ports)
+    
+    Args:
+        df: DataFrame with EDR logs containing User, SrcIp, DestinationIp, DestinationPort
+        baselines_dir: Path to baseline statistics
+        log_type: Log type for MongoDB query
+    
+    Returns:
+        List of alert dictionaries with type, subject, severity, score, text, evidence
+    """
+    alerts = []
+    
+    # ===== STEP 1: VALIDATE & PARSE EDR LOGS =====
+    required_cols = {"username", "message"}
+    if not required_cols.issubset(df.columns):
+        return alerts  # Not EDR logs
+    
+    # Check if this is EDR/Sysmon log
+    is_edr = False
+    if "message" in df.columns:
+        sample_msgs = df["message"].head(10).astype(str)
+        is_edr = sample_msgs.str.contains("Sysmon.*EventID=3|DestinationIp=|DestinationPort=", 
+                                          case=False, regex=True, na=False).any()
+    
+    if not is_edr:
+        return alerts  # Not EDR logs, skip
+    
+    # ===== STEP 2: EXTRACT NETWORK FEATURES FROM EDR LOGS =====
+    
+    def extract_edr_features(row):
+        """Extract network features including Image (process name)."""
+        msg = str(row.get("message", ""))
+        
+        # Extract DestinationIp
+        dest_ip_match = re.search(r"DestinationIp=([0-9\.]+)", msg)
+        dest_ip = dest_ip_match.group(1) if dest_ip_match else None
+        
+        # Extract DestinationPort
+        dest_port_match = re.search(r"DestinationPort=(\d+)", msg)
+        dest_port = int(dest_port_match.group(1)) if dest_port_match else None
+        
+        # Extract SrcIp
+        src_ip = row.get("source_ip")
+        if pd.isna(src_ip) or not src_ip:
+            src_ip_match = re.search(r"SrcIp=([0-9\.]+)", msg)
+            src_ip = src_ip_match.group(1) if src_ip_match else None
+        
+        # Extract Image (process path)
+        image_match = re.search(r"Image=([^\s]+)", msg)
+        image = image_match.group(1) if image_match else None
+        
+        return pd.Series({
+            "dest_ip": dest_ip,
+            "dest_port": dest_port,
+            "src_ip": src_ip,
+            "image": image
+        })
+    
+    # Apply extraction
+    edr_features = df.apply(extract_edr_features, axis=1)
+    df_edr = pd.concat([df, edr_features], axis=1)
+    
+    # Ensure timestamp is datetime
+    if "timestamp" in df_edr.columns:
+        df_edr["timestamp"] = pd.to_datetime(df_edr["timestamp"], errors="coerce")
+    
+    # ===== STEP 3: CONFIG - LOAD USER BASELINE & DEFINE POLICIES =====
+    
+    # Load user-to-group mapping from baseline (MongoDB or fallback to files)
+    user_baseline = {}
+    try:
+        from services.database import load_user_to_group
+        user_baseline = load_user_to_group(log_type=log_type)
+        if not user_baseline:
+            # Fallback to file
+            user_to_group_path = os.path.join(baselines_dir, "members", "user_to_group.json")
+            if os.path.exists(user_to_group_path):
+                with open(user_to_group_path, "r", encoding="utf-8") as f:
+                    user_baseline = json.load(f)
+    except Exception:
+        # If MongoDB fails, try file
+        try:
+            user_to_group_path = os.path.join(baselines_dir, "members", "user_to_group.json")
+            if os.path.exists(user_to_group_path):
+                with open(user_to_group_path, "r", encoding="utf-8") as f:
+                    user_baseline = json.load(f)
+        except Exception:
+            pass  # If baseline not available, user_baseline will be empty
+    
+    # Map Baseline Group → Security Policy Role
+    GROUP_TO_ROLE_POLICY = {
+        "itadmin": "admin",
+        "engineering": "engineer",
+        "sales": "sales",
+        "finance": "finance"
+    }
+    
+    # Role characteristics (Security Policies)
+    ROLE_CONFIG = {
+        "engineer": {
+            "risk_multiplier": 0.8,
+            "allowed_processes": ["powershell.exe", "cmd.exe", "ssh.exe", "python.exe"],
+            "is_technical": True,
+            "allow_ssh": True,
+            "allow_internal_infrastructure": True
+        },
+        "sales": {
+            "risk_multiplier": 1.2,
+            "allowed_processes": ["chrome.exe", "firefox.exe", "msedge.exe", "outlook.exe"],
+            "is_technical": False,
+            "allow_ssh": False,  # BLOCK SSH/RDP
+            "allow_internal_infrastructure": False  # BLOCK 10.10.10.x
+        },
+        "finance": {
+            "risk_multiplier": 1.3,
+            "allowed_processes": ["chrome.exe", "firefox.exe", "msedge.exe", "outlook.exe", "excel.exe"],
+            "is_technical": False,
+            "allow_ssh": False,  # BLOCK SSH/RDP
+            "allow_internal_infrastructure": False  # BLOCK 10.10.10.x
+        },
+        "admin": {
+            "risk_multiplier": 1.0,
+            "allowed_processes": [],  # Admins can run anything
+            "is_technical": True,
+            "allow_ssh": True,
+            "allow_internal_infrastructure": True
+        },
+        "unknown": {  # Default for unknown users
+            "risk_multiplier": 1.5,  # Higher risk for unknown users
+            "allowed_processes": [],
+            "is_technical": False,
+            "allow_ssh": False,  # BLOCK all sensitive access
+            "allow_internal_infrastructure": False
+        }
+    }
+    
+    # Risky processes for non-technical users
+    RISKY_PROCESSES = ["powershell.exe", "cmd.exe", "ssh.exe", "psexec.exe", "wmic.exe"]
+    
+    # Admin ports (SSH, RDP, etc.)
+    ADMIN_PORTS = {22, 23, 3389, 445, 1433, 3306, 5432}
+    
+    # Internal infrastructure servers
+    INTERNAL_INFRASTRUCTURE = ["10.10.10.20", "10.10.10.30", "10.10.10.40"]
+    
+    # ===== STEP 4: HELPER - GET USER ROLE FROM BASELINE =====
+    
+    def get_user_role(username: str) -> tuple:
+        """
+        Get user role from baseline data dynamically.
+        Returns: (role_name, role_config)
+        """
+        username_lower = str(username).lower().strip()
+        
+        # Lookup user in baseline
+        if username_lower in user_baseline:
+            group = user_baseline[username_lower]
+            # Map group to role policy
+            role_name = GROUP_TO_ROLE_POLICY.get(group, "unknown")
+        else:
+            # User not in baseline - treat as unknown
+            role_name = "unknown"
+        
+        role_config = ROLE_CONFIG.get(role_name, ROLE_CONFIG["unknown"])
+        
+        return role_name, role_config
+    
+    def is_external_ip(ip: str) -> bool:
+        """Check if IP is external (not RFC1918 private)."""
+        if not ip:
+            return False
+        ip_str = str(ip)
+        return not (ip_str.startswith("10.") or 
+                    ip_str.startswith("192.168.") or 
+                    ip_str.startswith("172.16.") or
+                    ip_str.startswith("172.17.") or
+                    ip_str.startswith("172.18.") or
+                    ip_str.startswith("172.19.") or
+                    ip_str.startswith("172.20.") or
+                    ip_str.startswith("172.21.") or
+                    ip_str.startswith("172.22.") or
+                    ip_str.startswith("172.23.") or
+                    ip_str.startswith("172.24.") or
+                    ip_str.startswith("172.25.") or
+                    ip_str.startswith("172.26.") or
+                    ip_str.startswith("172.27.") or
+                    ip_str.startswith("172.28.") or
+                    ip_str.startswith("172.29.") or
+                    ip_str.startswith("172.30.") or
+                    ip_str.startswith("172.31."))
+    
+    # ==============================================================================
+    # MODULE A: C2 BEACONING DETECTION (CRITICAL - New!)
+    # ==============================================================================
+    # Detect periodic connections to external IPs (malware calling home)
+    
+    try:
+        # Filter connections to external IPs
+        external_conns = df_edr[df_edr["dest_ip"].apply(is_external_ip)].copy()
+        
+        if not external_conns.empty and "timestamp" in external_conns.columns:
+            # Group by (user, dest_ip)
+            for (username, dest_ip), group in external_conns.groupby(["username", "dest_ip"]):
+                username = str(username).strip()
+                dest_ip = str(dest_ip)
+                
+                if len(group) < 10:  # Need at least 10 connections to detect pattern
+                    continue
+                
+                # Sort by timestamp
+                sorted_group = group.sort_values("timestamp")
+                timestamps = sorted_group["timestamp"].dropna()
+                
+                if len(timestamps) < 10:
+                    continue
+                
+                # Calculate time deltas between consecutive connections
+                time_deltas = timestamps.diff().dropna()
+                delta_seconds = time_deltas.dt.total_seconds()
+                
+                if len(delta_seconds) < 5:
+                    continue
+                
+                # Calculate variance of time deltas
+                mean_interval = delta_seconds.mean()
+                variance = delta_seconds.var()
+                std_dev = delta_seconds.std()
+                
+                # Beaconing signature: Low variance + regular interval
+                # Typical C2: every 5s, 10s, 30s, 60s with very low deviation
+                is_beaconing = False
+                
+                if variance < 5.0 and mean_interval < 300:  # < 5min interval, very regular
+                    is_beaconing = True
+                elif std_dev < 2.0 and mean_interval < 60:  # < 1min interval, tight timing
+                    is_beaconing = True
+                
+                if is_beaconing:
+                    # Extract process name
+                    process_name = "unknown"
+                    if "image" in sorted_group.columns:
+                        images = sorted_group["image"].dropna()
+                        if len(images) > 0:
+                            # Get most common process
+                            process_name = images.mode()[0] if not images.mode().empty else str(images.iloc[0])
+                            # Extract basename
+                            if "\\" in process_name or "/" in process_name:
+                                process_name = process_name.split("\\")[-1].split("/")[-1]
+                    
+                    alerts.append({
+                        "type": "c2_beaconing_detected",
+                        "subject": username,
+                        "severity": "CRITICAL",
+                        "score": 10.0,
+                        "text": f"🚨 C2 BEACONING: User {username} machine infected! Process '{process_name}' connecting to {dest_ip} every {mean_interval:.1f}s (variance: {variance:.2f})",
+                        "evidence": {
+                            "username": username,
+                            "dest_ip": dest_ip,
+                            "process": process_name,
+                            "connection_count": len(group),
+                            "mean_interval_seconds": float(mean_interval),
+                            "variance": float(variance),
+                            "std_dev": float(std_dev),
+                            "beaconing_pattern": f"Every {mean_interval:.1f}±{std_dev:.1f}s"
+                        },
+                        "prompt_ctx": {
+                            "user": username,
+                            "group": None,
+                            "behavior": {
+                                "type": "c2_beaconing",
+                                "process": process_name,
+                                "dest_ip": dest_ip,
+                                "interval": mean_interval
+                            },
+                            "time": None,
+                            "baseline": {},
+                            "extras": {
+                                "reason": "Periodic connection pattern detected - strong indicator of malware C2 communication"
+                            }
+                        }
+                    })
+    except Exception as e:
+        pass  # Beaconing detection failed, continue
+    
+    # ==============================================================================
+    # MODULE B: SUSPICIOUS PROCESS EXECUTION (CRITICAL - New!)
+    # ==============================================================================
+    # Detect non-technical users running technical tools to external IPs
+    
+    try:
+        for idx, row in df_edr.iterrows():
+            username = str(row.get("username", "")).strip()
+            if not username or username in ["(unknown)", "nan", ""]:
+                continue
+            
+            image = str(row.get("image", ""))
+            dest_ip = str(row.get("dest_ip", ""))
+            
+            if not image or not dest_ip:
+                continue
+            
+            # Extract process basename
+            process_name = image.split("\\")[-1].split("/")[-1].lower()
+            
+            # Check if external IP
+            if not is_external_ip(dest_ip):
+                continue
+            
+            # Infer user role
+            user_role, role_config = get_user_role(username)
+            
+            # Check if non-technical user
+            if role_config.get("is_technical", False):
+                continue  # Technical users can run these tools
+            
+            # Check if risky process
+            if any(risky in process_name for risky in RISKY_PROCESSES):
+                # Create alert key to avoid duplicates
+                alert_key = f"{username}_{process_name}_{dest_ip}"
+                
+                # Check if already alerted (use a set to track)
+                if not hasattr(_detect_edr_anomalies, '_process_alerts'):
+                    _detect_edr_anomalies._process_alerts = set()
+                
+                if alert_key in _detect_edr_anomalies._process_alerts:
+                    continue
+                
+                _detect_edr_anomalies._process_alerts.add(alert_key)
+                
+                alerts.append({
+                    "type": "suspicious_process_external_connection",
+                    "subject": username,
+                    "severity": "CRITICAL",
+                    "score": 9.5,
+                    "text": f"🚨 SUSPICIOUS PROCESS: {user_role} user '{username}' running {process_name} connecting to external IP {dest_ip}",
+                    "evidence": {
+                        "username": username,
+                        "user_role": user_role,
+                        "process": process_name,
+                        "dest_ip": dest_ip,
+                        "reason": f"{user_role} users should not run {process_name}"
+                    },
+                    "prompt_ctx": {
+                        "user": username,
+                        "group": None,
+                        "behavior": {
+                            "type": "suspicious_process",
+                            "process": process_name,
+                            "dest_ip": dest_ip
+                        },
+                        "time": None,
+                        "baseline": {},
+                        "extras": {
+                            "reason": f"Non-technical user ({user_role}) executing technical tool ({process_name}) to external network"
+                        }
+                    }
+                })
+    except Exception as e:
+        pass  # Process detection failed, continue
+    
+    # Clear process alerts tracking for next call
+    if hasattr(_detect_edr_anomalies, '_process_alerts'):
+        _detect_edr_anomalies._process_alerts = set()
+    
+    # ==============================================================================
+    # MODULE C: VOLUME SPIKE (Refined - Absolute Count Based)
+    # ==============================================================================
+    
+    # Load baseline from MongoDB (PRIMARY) or files (FALLBACK)
+    base = _load_baseline_tables(baselines_dir, log_type=log_type)
+    user_stats = base.get("user_stats")
+    if not isinstance(user_stats, pd.DataFrame) or user_stats.empty:
+        user_stats = pd.DataFrame()
+    else:
+        if "username" in user_stats.columns:
+            user_stats = user_stats.copy()
+            user_stats["username"] = user_stats["username"].astype(str)
+    
+    # Aggregate per-user activity
+    user_network_activity = df_edr.groupby("username").agg({
+        "src_ip": lambda x: x.dropna().nunique(),
+        "dest_ip": lambda x: x.dropna().unique().tolist(),
+        "dest_port": lambda x: x.dropna().unique().tolist()
+    }).reset_index()
+    
+    user_network_activity.columns = ["username", "unique_src_ips", "destinations", "dest_ports"]
+    
+    for _, row in user_network_activity.iterrows():
+        username = str(row["username"]).strip()
+        if not username or username in ["(unknown)", "nan", ""]:
+            continue
+        
+        unique_src_ips = int(row["unique_src_ips"])
+        destinations = row["destinations"]
+        dest_ports = [int(p) for p in row["dest_ports"] if pd.notna(p)]
+        
+        # Skip if too few connections
+        if unique_src_ips < 3:
+            continue
+        
+        # Get baseline
+        baseline_ips = 0.0
+        if not user_stats.empty and "unique_src_ips_mean" in user_stats.columns:
+            user_baseline = user_stats[user_stats["username"] == username]
+            if not user_baseline.empty:
+                baseline_ips = float(user_baseline["unique_src_ips_mean"].iloc[0] or 0.0)
+        
+        if baseline_ips == 0.0:
+            baseline_ips = 10.0  # Default baseline
+        
+        # Infer role
+        user_role, role_config = get_user_role(username)
+        
+        # ===== MODULE C: SCORING (Absolute + Percentage) =====
+        
+        # Base score (absolute count)
+        if unique_src_ips >= 30:
+            base_score = 9.0
+        elif unique_src_ips >= 20:
+            base_score = 7.0
+        elif unique_src_ips >= 10:
+            base_score = 5.0
+        else:
+            base_score = 3.0
+        
+        # Percentage increase bonus (capped)
+        if baseline_ips > 0:
+            pct_increase = (unique_src_ips - baseline_ips) / baseline_ips
+            if pct_increase > 3.0:
+                base_score += 1.0
+            elif pct_increase > 2.0:
+                base_score += 0.5
+        
+        
+        # ===== MODULE D: UPDATED PENALTY LOGIC (Sales/Finance Enforcement) =====
+        
+        penalty = 0.0
+        penalty_reasons = []
+        
+        # Rule 1: Sales/Finance BLOCKED from SSH/RDP (Port 22, 3389)
+        if not role_config.get("allow_ssh", True):  # If user NOT allowed SSH
+            ssh_rdp_ports = {22, 3389}
+            accessed_ssh_rdp = set(dest_ports) & ssh_rdp_ports
+            if accessed_ssh_rdp:
+                penalty += 3.0
+                port_names = [f"Port {p} ({'SSH' if p == 22 else 'RDP'})" for p in accessed_ssh_rdp]
+                penalty_reasons.append(f"{user_role.upper()} users BLOCKED from {', '.join(port_names)}")
+        
+        # Rule 2: Sales/Finance BLOCKED from Internal Infrastructure (10.10.10.x)
+        if not role_config.get("allow_internal_infrastructure", True):
+            accessed_internal = [ip for ip in destinations if ip in INTERNAL_INFRASTRUCTURE]
+            if accessed_internal:
+                penalty += 2.5
+                penalty_reasons.append(f"{user_role.upper()} users BLOCKED from internal infrastructure: {', '.join(accessed_internal)}")
+        
+        # Rule 3: Check for external connections to admin ports (all users)
+        external_admin_access = False
+        for dest_ip, dest_port in zip(destinations, dest_ports):
+            if is_external_ip(dest_ip) and dest_port in ADMIN_PORTS:
+                external_admin_access = True
+                penalty += 2.0
+                penalty_reasons.append(f"External admin access: {dest_ip}:{dest_port}")
+                break
+        
+        # Rule 4: Check for excessive external connections
+        external_ips = [ip for ip in destinations if is_external_ip(ip)]
+        if len(external_ips) > 10:
+            penalty += 1.0
+            penalty_reasons.append(f"High external IP count: {len(external_ips)} connections")
+        
+        # Apply role multiplier
+        risk_multiplier = role_config.get("risk_multiplier", 1.0)
+        final_score = (base_score + penalty) * risk_multiplier
+        final_score = min(final_score, 10.0)
+        
+        # Determine severity
+        if final_score >= 8.0:
+            severity = "CRITICAL"
+        elif final_score >= 5.0:
+            severity = "WARNING"
+        else:
+            severity = "INFO"
+        
+        # Skip low-risk alerts
+        if final_score < 4.0:
+            continue
+        
+        # Build alert text
+        alert_text = f"User {username} ({user_role}): {unique_src_ips} unique source IPs (baseline: {baseline_ips:.0f})"
+        
+        if penalty_reasons:
+            alert_text += " - " + "; ".join(penalty_reasons)
+        
+        # Build evidence
+        evidence = {
+            "username": username,
+            "user_role": user_role,
+            "unique_src_ips": unique_src_ips,
+            "baseline_ips": baseline_ips,
+            "destinations_count": len(destinations),
+            "unique_ports": len(dest_ports),
+            "external_ips_count": len(external_ips),
+            "penalty_reasons": penalty_reasons,
+            "risk_multiplier": risk_multiplier
+        }
+        
+        # Create alert
+        alerts.append({
+            "type": "edr_suspicious_network_activity",
+            "subject": username,
+            "severity": severity,
+            "score": final_score,
+            "text": alert_text,
+            "evidence": evidence,
+            "prompt_ctx": {
+                "user": username,
+                "group": None,
+                "behavior": {
+                    "type": "network_anomaly",
+                    "role": user_role,
+                    "unique_src_ips": unique_src_ips,
+                    "baseline_ips": baseline_ips
+                },
+                "time": None,
+                "baseline": {
+                    "expected_ips": baseline_ips,
+                    "user_role": user_role
+                },
+                "extras": {
+                    "penalty_reasons": penalty_reasons,
+                    "risk_calculation": "context-aware v2 (absolute + % + role + external admin only)"
+                }
+            }
+        })
+    
     return alerts
 
 def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = "generic") -> List[Dict[str, Any]]:
     """
     Step-2 generator: compare current window against stored baselines to produce human-readable alerts.
-    Lấy baseline từ MongoDB theo log_type (PRIMARY) hoặc files (FALLBACK).
     Returns a list of dicts {type, subject, severity, score, text, evidence}
+    
+    This improved version handles mixed logs (normal + attack) by using multiple detection strategies:
+    1. Pattern-based detection (high-confidence attacks)
+    2. Statistical deviation from baseline
+    3. Behavioral anomalies (spike detection)
+    
+    Args:
+        df: DataFrame with logs
+        baselines_dir: Path to baselines directory (for fallback)
+        log_type: Log type for MongoDB query (generic, linuxsyslog, edr, etc.)
     """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return []
@@ -1536,7 +2319,12 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
     # Firewall logs get IP-based detection with username resolution
     alerts.extend(_detect_firewall_anomalies(df))
 
+    # ===== EDR/SYSMON-SPECIFIC DETECTIONS WITH CONTEXT-AWARE SCORING =====
+    # EDR logs get context-aware detection (role + destination + behavioral analysis)
+    alerts.extend(_detect_edr_anomalies(df, baselines_dir, log_type=log_type))
+
     # ===== SECTION 0: ENHANCED DETECTION FOR MIXED LOGS =====
+
     
     # 0A) SSH Brute Force Detection - detect rapid SSH attempts
     if "action" in df.columns and "status" in df.columns and "username" in df.columns:
@@ -1639,9 +2427,15 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                     dest_ip = netfilter_match.group(2)
                     # Flag if > 50MB
                     if bytes_val > 50_000_000:
-                        username = str(row.get("username", hostname)).strip()
-                        if not username:
-                            username = hostname
+                        # Try to get username, fallback to source_ip, then hostname
+                        username = str(row.get("username", "")).strip()
+                        if not username or username in ["(unknown)", "nan", ""]:
+                            # Try source_ip as fallback
+                            source_ip = str(row.get("source_ip", "")).strip()
+                            if source_ip and source_ip not in ["", "nan"]:
+                                username = source_ip
+                            else:
+                                username = hostname if hostname else "(unknown)"
                         
                         key = (username, "netfilter", bytes_val, dest_ip)
                         if key not in detected_transfers:
@@ -1655,13 +2449,15 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                                 "baseline": {"max_normal_transfer": "50MB"},
                                 "extras": {"reason": f"Large network transfer detected: {bytes_val / 1_000_000:.1f}MB"},
                             }
+                            # Use username as subject for USER-CENTRIC alerts
+                            subject = username if username and username != "(unknown)" else hostname
                             alerts.append({
                                 "type": "data_exfiltration_detected",
-                                "subject": hostname,
+                                "subject": subject,  # USER-CENTRIC: use username, not hostname
                                 "severity": "CRITICAL",
                                 "score": min((bytes_val / 100_000_000) * 9.0, 10.0),
-                                "text": f"[CRITICAL] DATA EXFILTRATION: Large network transfer {bytes_val / 1_000_000:.1f}MB from {hostname} to {dest_ip}",
-                                "evidence": {"bytes": int(bytes_val), "destination": dest_ip, "source_host": hostname, "method": "network"},
+                                "text": f"[CRITICAL] DATA EXFILTRATION: User '{subject}' transferred {bytes_val / 1_000_000:.1f}MB to {dest_ip}",
+                                "evidence": {"user": subject, "bytes": int(bytes_val), "destination": dest_ip, "source_host": hostname, "method": "network"},
                                 "prompt_ctx": ctx,
                             })
         except Exception as e:
@@ -1719,8 +2515,6 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
     # These are high-confidence indicators of compromise
     if "message" in df.columns and "username" in df.columns:
         try:
-            import re
-            
             # Persistence patterns: crontab modification, reverse shells, rc.local, SSH key injection, etc
             persistence_patterns = [
                 {
@@ -1839,8 +2633,6 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
     # 0.5) Detect suspicious data access patterns using BASELINE comparison (NOT heuristic)
     if "message" in df.columns and "username" in df.columns:
         try:
-            import re
-            
             # Extract current data access features per user (same as baseline extraction)
             current_user_activity = {}  # user -> {db_queries, suspicious_ops, timestamps}
             
@@ -1983,10 +2775,11 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                         final_score = max(final_score, 4.0)
                         
                         # Map score to severity (UNIFIED)
+                        # Note: Use only CRITICAL, WARNING, INFO for consistency with frontend
                         if final_score >= 8.0:
                             severity = "CRITICAL"
                         elif final_score >= 6.0:
-                            severity = "HIGH"
+                            severity = "CRITICAL"  # HIGH mapped to CRITICAL for consistency
                         elif final_score >= 4.0:
                             severity = "WARNING"
                         else:
@@ -2000,12 +2793,12 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                             "text": f"Phát hiện hoạt động truy cập dữ liệu bất thường từ user '{display_user}': {'; '.join(reason_parts)}",
                             "evidence": {
                                 "user": display_user,
-                                "db_queries": current_queries,
-                                "db_queries_baseline": db_queries_mean,
-                                "suspicious_ops": current_suspicious,
-                                "suspicious_ops_baseline": suspicious_ops_mean,
-                                "z_queries": z_queries,
-                                "z_suspicious": z_suspicious,
+                                "db_queries": int(current_queries),
+                                "db_queries_baseline": float(db_queries_mean),
+                                "suspicious_ops": int(current_suspicious),
+                                "suspicious_ops_baseline": float(suspicious_ops_mean),
+                                "z_queries": float(z_queries),
+                                "z_suspicious": float(z_suspicious),
                                 "anomaly_score": anomaly_score,
                                 "final_score": final_score,
                             },
@@ -2042,9 +2835,93 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                     "severity": "WARNING",
                     "score": 4.0,
                     "text": f"User mới {nu} xuất hiện với {user_events} sự kiện, chưa có trong baseline.",
-                    "evidence": {"events": user_events},
+                    "evidence": {"events": int(user_events)},
                     "prompt_ctx": ctx,
                 })
+
+    # 0F) Web Authentication Failures - detect multiple failed HTTP auth attempts
+    if "http_status" in df.columns and "action" in df.columns and "username" in df.columns:
+        try:
+            # HTTP auth failures: 401, 403
+            http_logs = df[df.get("action", pd.Series(index=df.index)).astype(str).str.contains("access|get|post|put|delete", case=False, na=False)]
+            if not http_logs.empty:
+                for username, group in http_logs.groupby("username"):
+                    username = str(username).strip()
+                    if not username or username in ["(unknown)", "nan", ""]:
+                        continue
+                    
+                    http_status = pd.to_numeric(group["http_status"], errors="coerce")
+                    auth_failures = http_status[http_status.isin([401, 403])]
+                    total_requests = len(group)
+                    
+                    if total_requests >= 5 and len(auth_failures) >= 3:
+                        failure_rate = len(auth_failures) / total_requests
+                        if failure_rate >= 0.3:  # 30%+ auth failure rate
+                            ctx = {
+                                "user": username,
+                                "group": None,
+                                "behavior": {"type": "web_auth_failure", "failures": len(auth_failures), "total": total_requests},
+                                "time": None,
+                                "baseline": {"expected_auth_failure_rate": 0.05},
+                                "extras": {"reason": f"Elevated HTTP authentication failure rate"},
+                            }
+                            alerts.append({
+                                "type": "web_auth_failure_spike",
+                                "subject": username,
+                                "severity": "WARNING" if failure_rate < 0.5 else "CRITICAL",
+                                "score": min(failure_rate * 8, 10.0),
+                                "text": f"User {username} experienced {len(auth_failures)}/{total_requests} HTTP auth failures ({failure_rate:.1%} rate).",
+                                "evidence": {"failures": int(len(auth_failures)), "total_requests": int(total_requests), "failure_rate": float(failure_rate)},
+                                "prompt_ctx": ctx,
+                            })
+        except Exception:
+            pass
+    
+    # 0G) Sensitive Database Access Detection - detect abnormal database operations
+    if "message" in df.columns and "username" in df.columns:
+        try:
+            db_access_patterns = [
+                (r"pg_dump|mysqldump", "database_dump", 7.0),
+                (r"SELECT\s+\*\s+FROM\s+\w*user", "user_table_access", 6.0),
+                (r"ALTER\s+ROLE|ALTER\s+USER", "user_modification", 7.0),
+                (r"DROP\s+TABLE|DROP\s+DATABASE", "destructive_operation", 9.0),
+            ]
+            
+            db_alerts = {}  # (username, pattern) -> bool
+            
+            for idx, row in df.iterrows():
+                msg = str(row.get("message", "")).lower()
+                username = str(row.get("username", "(unknown)")).strip()
+                if not username:
+                    username = "(unknown)"
+                timestamp = row.get("timestamp")
+                
+                for pattern, pattern_name, score in db_access_patterns:
+                    if re.search(pattern, msg, re.IGNORECASE):
+                        key = (username, pattern_name)
+                        if key in db_alerts:
+                            continue
+                        db_alerts[key] = True
+                        
+                        ctx = {
+                            "user": username,
+                            "group": None,
+                            "behavior": {"type": "database_access", "operation": pattern_name},
+                            "time": _fmt_local_vn(timestamp),
+                            "baseline": {},
+                            "extras": {"reason": f"Sensitive database operation detected"},
+                        }
+                        alerts.append({
+                            "type": "sensitive_db_access_detected",
+                            "subject": username,
+                            "severity": "CRITICAL" if score >= 8 else "WARNING",
+                            "score": score,
+                            "text": f"Sensitive database operation by {username}: {msg[:200]}",
+                            "evidence": {"operation": pattern_name, "message": msg[:300]},
+                            "prompt_ctx": ctx,
+                        })
+        except Exception:
+            pass
 
     # 1) User download spike (Z-score against daily baseline if available)
     dl = _count_user_downloads(df)
@@ -2261,7 +3138,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                             ctx = {
                                 "user": str(username[0]) if len(username) > 0 else None,
                                 "group": None,
-                                "behavior": {"type": "blocked_actions_spike", "ratio": blocked_ratio, "count": blocked_count, "source": entity},
+                                "behavior": {"type": "blocked_actions_spike", "ratio": float(blocked_ratio), "count": int(blocked_count), "source": entity},
                                 "time": None,
                                 "baseline": {"expected_ratio": 0.2},
                                 "extras": {"reason": f"High ratio of blocked/denied actions from {entity}"},
@@ -2292,7 +3169,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                         ctx = {
                             "user": None,
                             "group": None,
-                            "behavior": {"type": "blocked_actions_spike", "ratio": blocked_ratio, "count": blocked_count},
+                            "behavior": {"type": "blocked_actions_spike", "ratio": float(blocked_ratio), "count": int(blocked_count)},
                             "time": None,
                             "baseline": {"expected_ratio": 0.2},
                             "extras": {"reason": f"High ratio of blocked/denied actions"},
@@ -2303,7 +3180,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                             "severity": "CRITICAL" if blocked_ratio > 0.8 else "WARNING",
                             "score": min(blocked_ratio * 10, 10.0),
                             "text": f"Phát hiện {blocked_count}/{total_count} hành động bị chặn ({blocked_ratio:.1%}). Điều này có thể cho thấy cuộc tấn công hoặc cấu hình sai.",
-                            "evidence": {"blocked_count": blocked_count, "total_count": total_count, "ratio": float(blocked_ratio)},
+                            "evidence": {"blocked_count": int(blocked_count), "total_count": int(total_count), "ratio": float(blocked_ratio)},
                             "prompt_ctx": ctx,
                         })
         except Exception:
@@ -2428,7 +3305,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                         "severity": "WARNING" if len(u_foreign) < 5 else "CRITICAL",
                         "score": 4.0 + min(len(u_foreign) * 0.2, 2.0),
                         "text": f"User {u} truy cập từ quốc gia nước ngoài: {', '.join(countries)} ({len(u_foreign)} sự kiện).",
-                        "evidence": {"countries": list(countries), "events": len(u_foreign)},
+                        "evidence": {"countries": list(countries), "events": int(len(u_foreign))},
                         "prompt_ctx": ctx,
                     })
 
@@ -2469,7 +3346,7 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                             "severity": scoring.get_severity(off_hours_score),  # Use unified scoring
                             "score": off_hours_score,
                             "text": f"User {u} truy cập ngoài giờ làm việc ({len(u_outside)} sự kiện vào lúc {sorted([int(h) for h in hours])}h).",
-                            "evidence": {"hours": sorted([int(h) for h in hours]), "events": len(u_outside)},
+                            "evidence": {"hours": sorted([int(h) for h in hours]), "events": int(len(u_outside))},
                             "prompt_ctx": ctx,
                         })
         except Exception:
@@ -2513,6 +3390,53 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                         "evidence": {"source_ip": ip, "geoip_country": ctry},
                         "prompt_ctx": ctx,
                     })
+
+    # NEW: DHCP-specific attack detection (when DHCP logs detected)
+    if "program" in df.columns and df["program"].eq("dhcpd").any():
+        # Add scope conflict detection
+        dhcp_scope_alerts = _detect_dhcp_scope_conflicts(df)
+        alerts.extend(dhcp_scope_alerts)
+        
+        # Add rogue server / NAK storm detection
+        dhcp_rogue_alerts = _detect_dhcp_rogue_server(df)
+        alerts.extend(dhcp_rogue_alerts)
+        
+        # Add device user mismatch detection
+        dhcp_mismatch_alerts = _detect_dhcp_user_device_mismatch(df)
+        alerts.extend(dhcp_mismatch_alerts)
+    
+    # NEW: DNS-specific attack detection (when DNS/dnsmasq logs detected)
+    if "program" in df.columns and df["program"].eq("dnsmasq").any():
+        dns_alerts = _detect_dns_anomalies(df)
+        alerts.extend(dns_alerts)
+    
+    
+    # NEW: Firewall-specific attack detection (firewall OR UFW logs)
+    # The detector now checks internally for both program=='firewall' and UFW patterns
+    fw_alerts = _detect_firewall_anomalies(df)
+    alerts.extend(fw_alerts)
+    
+    # NEW: Apache/Web-specific attack detection (when apache logs detected)
+    # Detector checks for Apache-specific columns (http_status, path, vhost) internally
+    apache_alerts = _detect_apache_anomalies(df)
+    alerts.extend(apache_alerts)
+    
+    # DISABLED: Network link flap is infrastructure noise, not user behavior
+    # For UEBA (User Entity Behavior Analytics), focus on user actions only
+    # network_alerts = _detect_network_link_flap(df)
+    # alerts.extend(network_alerts)
+    
+    # NEW: Cron job overlap detection (same script running multiple times)
+    cron_alerts = _detect_cron_job_overlap(df)
+    alerts.extend(cron_alerts)
+    
+    # NEW: SSH successful login burst detection (potential lateral movement)
+    ssh_burst_alerts = _detect_ssh_login_burst(df)
+    alerts.extend(ssh_burst_alerts)
+    
+    # NEW: Privilege escalation detection (non-admin users running privileged operations)
+    priv_esc_alerts = _detect_privilege_escalation(df)
+    alerts.extend(priv_esc_alerts)
 
     return alerts
 
