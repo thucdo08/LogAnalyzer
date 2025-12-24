@@ -210,9 +210,18 @@ def anomaly_raw():
 
         # 1) Ingest + normalize
         _, df_raw, _ = preprocess_any(f, filename=f.filename, start_iso=t_from, end_iso=t_to)
+        print(f"[DEBUG] After preprocess_any: df_raw shape={df_raw.shape}, columns={df_raw.columns.tolist() if hasattr(df_raw, 'columns') else 'N/A'}")
+        if df_raw.empty:
+            print(f"[WARNING] DataFrame is empty after preprocessing!")
+            return jsonify({
+                "ok": False,
+                "error": "File rỗng hoặc không thể phân tích được",
+                "details": f"File {f.filename} không chứa dữ liệu logs hợp lệ"
+            }), 400
 
         # 2) Reduce noise and enrich (to enable ip_scope/geoip)
         df_used = reduce_noise(df_raw, threshold=5)
+        print(f"[DEBUG] After reduce_noise: df_used shape={df_used.shape}")
         enrich_cfg = {
             "mask_pii": True,
             "geoip_mmdb": RULES.get("geoip_mmdb"),
@@ -257,14 +266,17 @@ def anomaly_raw():
                 if log_type != "generic":
                     break
         
-        # Load baselines from common baselines folder (all log types share same files)
+        # Load baselines from MongoDB (PRIMARY) or config/baselines/ (FALLBACK)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
-        print(f"Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
-        alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
+        print(f"[DEBUG] Anomaly raw: using log_type={log_type}, baselines_dir={base_dir}")
+        print(f"[DEBUG] Calling generate_raw_anomalies with df_used shape={df_used.shape}")
+        alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir, log_type=log_type)
+        print(f"[DEBUG] generate_raw_anomalies returned {len(alerts)} alerts")
 
         # Filter alerts by min_score (default 3.5 to reduce noise)
         min_score = float(request.form.get("min_score", "3.5"))
         alerts_filtered = [a for a in alerts if a.get("score", 0) >= min_score]
+        print(f"[DEBUG] After filtering by min_score={min_score}: {len(alerts_filtered)} alerts")
 
         # Ensure all alerts have valid severity (CRITICAL, WARNING, INFO)
         valid_severities = {"CRITICAL", "WARNING", "INFO"}
@@ -527,10 +539,10 @@ def analyze():
                 if log_type != "generic":
                     break
         
-        # Load baselines from common baselines folder (all log types share same files)
+        # Load baselines from MongoDB (PRIMARY) or config/baselines/ (FALLBACK)
         base_dir = os.path.join(os.path.dirname(__file__), "config", "baselines")
         print(f"  → Log type: {log_type}, baselines_dir={base_dir}")
-        all_alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir)
+        all_alerts = generate_raw_anomalies(df_used, baselines_dir=base_dir, log_type=log_type)
         print(f"  → Tổng cảnh báo thô: {len(all_alerts)}")
 
         # Lọc theo min_score
@@ -1151,8 +1163,9 @@ def _detect_log_type_from_df(df: pd.DataFrame) -> str:
 @app.post("/baseline/train")
 def baseline_train():
     """
-    Train baseline và LƯU GỘP (append/merge) vào file cũ thay vì ghi đè.
-    Tự động detect log_type từ file content và lưu vào config/baselines/<log_type>/.
+    Train baseline và LƯU GỘP (append/merge) vào MongoDB (không tạo file).
+    Tự động detect log_type từ file content.
+    NOTE: config/baselines/ file creation is DISABLED - MongoDB is primary storage
     
     Hỗ trợ:
       - file | files (multipart)
@@ -1168,6 +1181,11 @@ def baseline_train():
                 build_user_baselines, build_device_baselines,
                 build_group_baselines, build_global_baseline,
                 apply_group_mapping, extract_group_membership
+            )
+            from services.database import (
+                save_user_stats, save_device_stats, save_group_stats, save_global_stats,
+                save_group_members, save_user_to_group, save_device_to_group,
+                save_user_models, save_device_models, save_group_models
             )
             import joblib
         except Exception as ie:
@@ -1230,79 +1248,129 @@ def baseline_train():
         
         global_stats = build_global_baseline(df_hist)
 
-        # === LƯU GỘP (append/merge) - all in one common baselines folder ===
-        base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
-        out_dir = base_root  # All baselines go to config/baselines/ (single shared folder)
-        os.makedirs(out_dir, exist_ok=True)
+        # === SAVE TO MONGODB (PRIMARY) ===
+        mongo_success = False
+        try:
+            # Save statistics to MongoDB
+            print(f"[MONGO] Saving baselines to MongoDB: log_type={log_type}")
+            save_user_stats(user_stats, log_type=log_type)
+            save_device_stats(device_stats, log_type=log_type)
+            save_group_stats(group_stats, log_type=log_type)
+            save_global_stats(global_stats, log_type=log_type)
+            
+            # Save member/group data to MongoDB
+            print(f"[MONGO] Saving member mappings to MongoDB")
+            members = extract_group_membership(df_hist, group_col="group")
+            save_group_members(members.get("groups", {}), log_type=log_type)
+            save_user_to_group(members.get("user_to_group", {}), log_type=log_type)
+            save_device_to_group(members.get("device_to_group", {}), log_type=log_type)
+            
+            # Save ML models to MongoDB
+            print(f"[MONGO] Saving ML models to MongoDB")
+            save_user_models(user_models, log_type=log_type)
+            save_device_models(device_models, log_type=log_type)
+            save_group_models(group_models, log_type=log_type)
+            
+            print(f"[MONGO] Successfully saved baselines and models to MongoDB")
+            mongo_success = True
+            
+        except Exception as db_error:
+            print(f"[MONGO] Warning: Failed to save to MongoDB: {db_error}")
+            import traceback
+            print("Traceback:", traceback.format_exc())
 
-        # 1) USER STATS (merge theo 'username')
-        user_stats_path = os.path.join(out_dir, "user_stats.json")
-        old_user = _safe_load_json_df(user_stats_path)
-        if "username" not in user_stats.columns:
-            user_stats = user_stats.copy()
-            user_stats["username"] = "(unknown)"
-        merged_user = _merge_by_key(old_user, user_stats, key_col="username")
-        _safe_atomic_write_text(user_stats_path, merged_user.to_json(orient="records", force_ascii=False))
+        # === BACKUP TO FILES (SECONDARY - config/baselines/) ===
+        backup_success = False
+        try:
+            print(f"[BACKUP] Creating backup files in config/baselines/")
+            base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
+            out_dir = base_root
+            os.makedirs(out_dir, exist_ok=True)
+            
+            # 1) USER STATS (merge theo 'username')
+            user_stats_path = os.path.join(out_dir, "user_stats.json")
+            old_user = _safe_load_json_df(user_stats_path)
+            if "username" not in user_stats.columns:
+                user_stats = user_stats.copy()
+                user_stats["username"] = "(unknown)"
+            merged_user = _merge_by_key(old_user, user_stats, key_col="username")
+            _safe_atomic_write_text(user_stats_path, merged_user.to_json(orient="records", force_ascii=False))
+            print(f"[BACKUP]   ✓ user_stats.json ({len(merged_user)} records)")
+            
+            # 2) DEVICE STATS (merge theo 'host' nếu có, else 'source_ip', else append)
+            device_stats_path = os.path.join(out_dir, "device_stats.json")
+            old_dev = _safe_load_json_df(device_stats_path)
+            dev_key = "host" if "host" in device_stats.columns else ("source_ip" if "source_ip" in device_stats.columns else None)
+            if dev_key:
+                merged_dev = _merge_by_key(old_dev, device_stats, key_col=dev_key)
+            else:
+                merged_dev = pd.concat([old_dev, device_stats], ignore_index=True)
+            _safe_atomic_write_text(device_stats_path, merged_dev.to_json(orient="records", force_ascii=False))
+            print(f"[BACKUP]   ✓ device_stats.json ({len(merged_dev)} records)")
+            
+            # 3) GROUP STATS (merge theo 'group')
+            group_stats_path = os.path.join(out_dir, "group_stats.json")
+            old_group = _safe_load_json_df(group_stats_path)
+            if not group_stats.empty:
+                if "group" not in group_stats.columns:
+                    if "department" in group_stats.columns:
+                        group_stats = group_stats.rename(columns={"department": "group"})
+                    else:
+                        group_stats = group_stats.copy()
+                        group_stats["group"] = "(unknown)"
+                merged_group = _merge_by_key(old_group, group_stats, key_col="group")
+            else:
+                merged_group = old_group
+            _safe_atomic_write_text(group_stats_path, merged_group.to_json(orient="records", force_ascii=False))
+            print(f"[BACKUP]   ✓ group_stats.json ({len(merged_group)} records)")
+            
+            # 4) GLOBAL BASELINE (append snapshot)
+            global_path = os.path.join(out_dir, "global_baseline.json")
+            _append_global_snapshot(global_path, global_stats)
+            print(f"[BACKUP]   ✓ global_baseline.json")
+            
+            # 5) MODELS (update dict, không xoá model cũ)
+            _joblib_merge_dict(os.path.join(out_dir, "user_models.joblib"),   user_models)
+            _joblib_merge_dict(os.path.join(out_dir, "device_models.joblib"), device_models)
+            _joblib_merge_dict(os.path.join(out_dir, "group_models.joblib"),  group_models)
+            print(f"[BACKUP]   ✓ user/device/group_models.joblib")
+            
+            # 6) MEMBERSHIP EXPORT (ai thuộc nhóm nào)
+            members = extract_group_membership(df_hist, group_col="group")
+            members_dir = os.path.join(out_dir, "members")
+            os.makedirs(members_dir, exist_ok=True)
+            _json_merge_groups(os.path.join(members_dir, "group_members.json"), members.get("groups", {}))
+            _json_merge_map(os.path.join(members_dir, "user_to_group.json"),   members.get("user_to_group", {}))
+            _json_merge_map(os.path.join(members_dir, "device_to_group.json"), members.get("device_to_group", {}))
+            print(f"[BACKUP]   ✓ group_members/user_to_group/device_to_group.json")
+            
+            print(f"[BACKUP] ✓ Successfully created backup files")
+            backup_success = True
+            
+        except Exception as backup_error:
+            print(f"[BACKUP] ⚠ Warning: Failed to create backup files: {backup_error}")
+            import traceback
+            print("Traceback:", traceback.format_exc())
 
-        # 2) DEVICE STATS (merge theo 'host' nếu có, else 'source_ip', else append)
-        device_stats_path = os.path.join(out_dir, "device_stats.json")
-        old_dev = _safe_load_json_df(device_stats_path)
-        dev_key = "host" if "host" in device_stats.columns else ("source_ip" if "source_ip" in device_stats.columns else None)
-        if dev_key:
-            merged_dev = _merge_by_key(old_dev, device_stats, key_col=dev_key)
+        # === RETURN STATUS ===
+        status_msg = []
+        if mongo_success:
+            status_msg.append("MongoDB: ✓")
         else:
-            merged_dev = pd.concat([old_dev, device_stats], ignore_index=True)
-        _safe_atomic_write_text(device_stats_path, merged_dev.to_json(orient="records", force_ascii=False))
-
-        # 3) GROUP STATS (merge theo 'group')
-        group_stats_path = os.path.join(out_dir, "group_stats.json")
-        old_group = _safe_load_json_df(group_stats_path)
-        if not group_stats.empty:
-            if "group" not in group_stats.columns:
-                if "department" in group_stats.columns:
-                    group_stats = group_stats.rename(columns={"department": "group"})
-                else:
-                    group_stats = group_stats.copy()
-                    group_stats["group"] = "(unknown)"
-            merged_group = _merge_by_key(old_group, group_stats, key_col="group")
+            status_msg.append("MongoDB: ⚠")
+        
+        if backup_success:
+            status_msg.append("Backup: ✓")
         else:
-            merged_group = old_group
-        _safe_atomic_write_text(group_stats_path, merged_group.to_json(orient="records", force_ascii=False))
-
-        # 4) GLOBAL BASELINE (append snapshot)
-        global_path = os.path.join(out_dir, "global_baseline.json")
-        _append_global_snapshot(global_path, global_stats)
-
-        # 5) MODELS (update dict, không xoá model cũ)
-        _joblib_merge_dict(os.path.join(out_dir, "user_models.joblib"),   user_models)
-        _joblib_merge_dict(os.path.join(out_dir, "device_models.joblib"), device_models)
-        _joblib_merge_dict(os.path.join(out_dir, "group_models.joblib"),  group_models)
-
-        # 6) MEMBERSHIP EXPORT (ai thuộc nhóm nào)
-        members = extract_group_membership(df_hist, group_col="group")
-        members_dir = os.path.join(out_dir, "members")
-        os.makedirs(members_dir, exist_ok=True)
-        _json_merge_groups(os.path.join(members_dir, "group_members.json"), members.get("groups", {}))
-        _json_merge_map(os.path.join(members_dir, "user_to_group.json"),   members.get("user_to_group", {}))
-        _json_merge_map(os.path.join(members_dir, "device_to_group.json"), members.get("device_to_group", {}))
+            status_msg.append("Backup: ⚠")
 
         return jsonify({
-            "ok": True,
+            "ok": mongo_success,  # Consider it OK only if MongoDB save succeeded
             "rows": int(len(df_hist)),
             "log_type": log_type,
-            "paths": {
-                "user_stats": "config/baselines/user_stats.json",
-                "device_stats": "config/baselines/device_stats.json",
-                "group_stats": "config/baselines/group_stats.json",
-                "global_baseline": "config/baselines/global_baseline.json",
-                "user_models": "config/baselines/user_models.joblib",
-                "device_models": "config/baselines/device_models.joblib",
-                "group_models": "config/baselines/group_models.joblib",
-                "group_members": "config/baselines/members/group_members.json",
-                "user_to_group": "config/baselines/members/user_to_group.json",
-                "device_to_group": "config/baselines/members/device_to_group.json",
-            },
-            "merge": "append+override-by-key"
+            "storage": "MongoDB Atlas (Primary) + config/baselines/ (Backup)",
+            "status": " | ".join(status_msg),
+            "message": "Baseline trained and saved to MongoDB (and backed up to files)"
         })
 
     except Exception as e:
@@ -1312,37 +1380,139 @@ def baseline_train():
         return jsonify({"ok": False, "error": f"Baseline train lỗi: {e}"}), 500
 
 
-# ===================== Membership viewer (optional) =====================
-@app.get("/baseline/groups")
-def baseline_groups():
+# ===================== Membership viewer (DISABLED - config/baselines/ no longer created) =====================
+# @app.get("/baseline/groups")
+# def baseline_groups():
+#     """
+#     Xem nhanh membership đã lưu: group_members / user_to_group / device_to_group
+#     DISABLED: Tất cả baselines bây giờ được lưu trong MongoDB, không phải config/baselines/
+#     """
+#     try:
+#         base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
+#         
+#         out = {}
+#         members_dir = os.path.join(base_root, "members")
+#         
+#         for name in ["group_members.json", "user_to_group.json", "device_to_group.json"]:
+#             p = os.path.join(members_dir, name)
+#             if os.path.exists(p):
+#                 with open(p, "r", encoding="utf-8") as f:
+#                     out[name] = json.load(f)
+#             else:
+#                 out[name] = None
+#         
+#         # Also show baseline files info
+#         out["baseline_files"] = []
+#         for fname in ["user_stats.json", "device_stats.json", "group_stats.json", "global_baseline.json"]:
+#             fpath = os.path.join(base_root, fname)
+#             if os.path.exists(fpath):
+#                 out["baseline_files"].append(fname)
+#         
+#         return jsonify({"ok": True, "baselines_location": f"config/baselines/", **out})
+#     except Exception as e:
+#         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ===================== Baseline Members Endpoint =====================
+
+@app.get("/baseline/members")
+def baseline_members():
     """
-    Xem nhanh membership đã lưu: group_members / user_to_group / device_to_group
-    Tất cả baselines được lưu trong chung 1 thư mục config/baselines/
+    Lấy member/group mapping từ MongoDB.
+    Query params: ?log_type=linuxsyslog (mặc định: generic)
     """
     try:
-        base_root = os.path.join(os.path.dirname(__file__), "config", "baselines")
+        from services.database import (
+            load_group_members, load_user_to_group, load_device_to_group,
+            group_members_col, user_to_group_col, device_to_group_col
+        )
         
-        out = {}
-        members_dir = os.path.join(base_root, "members")
+        log_type = request.args.get("log_type", "generic")
         
-        for name in ["group_members.json", "user_to_group.json", "device_to_group.json"]:
-            p = os.path.join(members_dir, name)
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    out[name] = json.load(f)
-            else:
-                out[name] = None
+        # Load từ MongoDB
+        group_members = load_group_members(log_type=log_type)
+        user_to_group = load_user_to_group(log_type=log_type)
+        device_to_group = load_device_to_group(log_type=log_type)
         
-        # Also show baseline files info
-        out["baseline_files"] = []
-        for fname in ["user_stats.json", "device_stats.json", "group_stats.json", "global_baseline.json"]:
-            fpath = os.path.join(base_root, fname)
-            if os.path.exists(fpath):
-                out["baseline_files"].append(fname)
+        status = {
+            "log_type": log_type,
+            "timestamp": datetime.utcnow().isoformat(),
+            "collections": {
+                "group_members": group_members_col.count_documents({"log_type": log_type}),
+                "user_to_group": user_to_group_col.count_documents({"log_type": log_type}),
+                "device_to_group": device_to_group_col.count_documents({"log_type": log_type})
+            },
+            "data": {
+                "group_members": group_members,
+                "user_to_group": user_to_group,
+                "device_to_group": device_to_group
+            }
+        }
         
-        return jsonify({"ok": True, "baselines_location": f"config/baselines/", **out})
+        return jsonify(status)
+        
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        import traceback
+        print(f"Error loading baseline members: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            "error": f"Failed to load baseline members: {e}",
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+
+# ===================== Baseline Status Endpoint =====================
+
+@app.get("/baseline/status")
+def baseline_status():
+    """
+    Kiểm tra status và số bản ghi trong MongoDB Atlas.
+    Returns: số lượng document trong từng collection (user_stats, device_stats, group_stats, global_stats)
+    """
+    try:
+        from services.database import (
+            user_stats_col, device_stats_col, group_stats_col, global_stats_col,
+            group_members_col, user_to_group_col, device_to_group_col
+        )
+        
+        status = {
+            "connection": "Connected to MongoDB",
+            "database": "log_analysis",
+            "collections": {
+                "user_stats": user_stats_col.count_documents({}),
+                "device_stats": device_stats_col.count_documents({}),
+                "group_stats": group_stats_col.count_documents({}),
+                "global_stats": global_stats_col.count_documents({}),
+                "group_members": group_members_col.count_documents({}),
+                "user_to_group": user_to_group_col.count_documents({}),
+                "device_to_group": device_to_group_col.count_documents({})
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Sample documents
+        user_sample = user_stats_col.find_one()
+        device_sample = device_stats_col.find_one()
+        group_sample = group_stats_col.find_one()
+        global_sample = global_stats_col.find_one()
+        
+        status["samples"] = {
+            "user_stats_sample": _json_safe(user_sample) if user_sample else None,
+            "device_stats_sample": _json_safe(device_sample) if device_sample else None,
+            "group_stats_sample": _json_safe(group_sample) if group_sample else None,
+            "global_stats_sample": _json_safe(global_sample) if global_sample else None,
+        }
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        import traceback
+        print(f"Error checking baseline status: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            "error": f"Failed to check baseline status: {e}",
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
 
 
 # ==================== Alert Endpoints ====================
@@ -1506,6 +1676,152 @@ def send_zalo():
         return jsonify({
             'status': 'error',
             'message': str(e)
+        }), 500
+
+
+@app.route('/api/health/mongodb', methods=['GET'])
+def health_mongodb():
+    """
+    Kiểm tra kết nối MongoDB Atlas.
+    Phục vụ để xác nhận MongoDB đã được cấu hình đúng.
+    
+    Response:
+    {
+        "status": "connected|disconnected",
+        "mongo_uri": "mongodb+srv://...",
+        "db_name": "log_analysis",
+        "collections": {
+            "device_stats": <count>,
+            "user_stats": <count>,
+            "group_stats": <count>,
+            "global_stats": <count>,
+            "device_to_group": <count>,
+            "user_to_group": <count>,
+            "group_members": <count>
+        },
+        "error": "<error message if any>"
+    }
+    """
+    try:
+        from services.database import get_db
+        
+        db = get_db()
+        
+        # Test connection by running a simple command
+        db.command('ping')
+        
+        mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+        db_name = os.getenv("MONGO_DB_NAME", "log_analysis")
+        
+        # Count documents in each collection
+        collections_info = {}
+        collection_names = [
+            "device_stats", "user_stats", "group_stats", "global_stats",
+            "device_to_group", "user_to_group", "group_members"
+        ]
+        
+        for col_name in collection_names:
+            try:
+                count = db[col_name].count_documents({})
+                collections_info[col_name] = count
+            except Exception as e:
+                collections_info[col_name] = f"Error: {str(e)}"
+        
+        return jsonify({
+            "status": "connected",
+            "mongo_uri": mongo_uri.replace(mongo_uri.split('@')[0].split(':')[1].split(':')[2], '****') if '@' in mongo_uri else mongo_uri,
+            "db_name": db_name,
+            "collections": collections_info,
+            "message": "MongoDB Atlas connection successful!"
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        print(f"MongoDB health check failed: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            "status": "disconnected",
+            "error": str(e),
+            "message": "Không thể kết nối tới MongoDB. Kiểm tra MONGO_URI và MONGO_DB_NAME trong .env file"
+        }), 500
+
+
+@app.route('/api/baseline/sync', methods=['POST'])
+def sync_baseline_from_mongodb():
+    """
+    Endpoint để lấy dữ liệu baseline từ MongoDB và trả về.
+    Dùng để xác nhận rằng hệ thống đang sử dụng MongoDB baseline.
+    
+    Query parameters:
+    - log_type: loại log (default: "generic", ví dụ: "linuxsyslog", "edr", "windows_eventlog")
+    
+    Response:
+    {
+        "ok": true,
+        "log_type": "linuxsyslog",
+        "source": "mongodb",
+        "baseline": {
+            "device_stats": [...],
+            "user_stats": [...],
+            "group_stats": [...],
+            "global_stats": {...},
+            "device_to_group": {...},
+            "user_to_group": {...},
+            "group_members": {...}
+        }
+    }
+    """
+    try:
+        log_type = request.args.get("log_type", "generic")
+        
+        from services.database import (
+            load_device_stats, load_user_stats, load_group_stats, 
+            load_global_stats, load_device_to_group, load_user_to_group,
+            load_group_members
+        )
+        
+        # Load all baselines
+        device_stats = load_device_stats(log_type=log_type)
+        user_stats = load_user_stats(log_type=log_type)
+        group_stats = load_group_stats(log_type=log_type)
+        global_stats = load_global_stats(log_type=log_type)
+        device_to_group = load_device_to_group(log_type=log_type)
+        user_to_group = load_user_to_group(log_type=log_type)
+        group_members = load_group_members(log_type=log_type)
+        
+        baseline_data = {
+            "device_stats": _json_safe(device_stats.to_dict(orient="records") if not device_stats.empty else []),
+            "user_stats": _json_safe(user_stats.to_dict(orient="records") if not user_stats.empty else []),
+            "group_stats": _json_safe(group_stats.to_dict(orient="records") if not group_stats.empty else []),
+            "global_stats": _json_safe(global_stats),
+            "device_to_group": device_to_group,
+            "user_to_group": user_to_group,
+            "group_members": group_members
+        }
+        
+        return jsonify({
+            "ok": True,
+            "log_type": log_type,
+            "source": "mongodb",
+            "baseline": baseline_data,
+            "summary": {
+                "device_stats_count": len(device_stats),
+                "user_stats_count": len(user_stats),
+                "group_stats_count": len(group_stats),
+                "devices_mapped": len(device_to_group),
+                "users_mapped": len(user_to_group),
+                "groups": len(group_members)
+            }
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        print(f"Sync baseline error: {e}")
+        print(traceback.format_exc())
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "message": "Lỗi khi lấy baseline từ MongoDB"
         }), 500
 
 
