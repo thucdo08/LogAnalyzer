@@ -13,3 +13,8 @@ __pycache__/
 # Chặn thư mục thư viện Javascript
 node_modules/
 
+# Ignore generated baseline files
+backend/config/baselines/*.joblib
+backend/config/baselines/*.json
+backend/config/alerts/
+
