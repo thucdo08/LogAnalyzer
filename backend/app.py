@@ -636,7 +636,7 @@ def analyze():
                 # Build a combined prompt with all alert types for this subject
                 alert_types = list(set(a.get("type") for a in alerts_group))
                 alert_summary = "\n".join([
-                    f"  - {a.get('type')}: {a.get('text', '')[:100]}"
+                    f"  - {a.get('type')}: {a.get('text', '')}"
                     for a in sorted(alerts_group, key=lambda x: x.get('score', 0), reverse=True)
                 ])
                 
@@ -765,7 +765,7 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
             # Lấy top 2 events từ alerts
             sample_alerts = grouped_item.get("alerts", [])[:2]
             events = [
-                f"[{a.get('type')}] {a.get('text', '')[:100]}"
+                f"[{a.get('type')}] {a.get('text', '')}"
                 for a in sample_alerts
             ]
             if len(grouped_item.get("alerts", [])) > 2:
