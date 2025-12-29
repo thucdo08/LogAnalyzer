@@ -360,7 +360,7 @@ export default function App() {
             <span className="text-3xl">🔍</span>
           </div>
           <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
-            Log Analyzer Pro
+            Log Analyzer
           </h1>
           <p className="text-slate-500 mt-2 text-lg">
             Nền tảng phân tích log thông minh với AI
