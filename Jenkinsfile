@@ -54,7 +54,7 @@ pipeline {
                         string(credentialsId: 'n8n-webhook-url', variable: 'ENV_N8N_URL'),
                         string(credentialsId: 'mongodb-atlas-uri', variable: 'ENV_MONGO_URI'),
                         string(credentialsId: 'mongodb-db-name', variable: 'ENV_MONGO_DB_NAME'),
-                        string(credentialsId: 'cloudflare-tunnel-token', variable: 'TOKEN_CF')
+                        string(credentialsId: 'cloudfare-tunnel-token', variable: 'TOKEN_CF')
                     ]) {
                         sh """
                             echo "FLASK_ENV=production" > ./backend/.env
