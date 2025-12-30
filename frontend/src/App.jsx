@@ -5,7 +5,7 @@ import "primereact/resources/primereact.min.css";
 import "primeicons/primeicons.css";
 import "./App.css";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = "https://api.loganalyzer.thuandoandevops.site";
 
 const SEVERITY_PRIORITY = {
   CRITICAL: 3,
