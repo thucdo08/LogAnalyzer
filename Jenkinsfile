@@ -53,7 +53,8 @@ pipeline {
                         string(credentialsId: 'openai-api-key', variable: 'ENV_OPENAI_KEY'),
                         string(credentialsId: 'n8n-webhook-url', variable: 'ENV_N8N_URL'),
                         string(credentialsId: 'mongodb-atlas-uri', variable: 'ENV_MONGO_URI'),
-                        string(credentialsId: 'mongodb-db-name', variable: 'ENV_MONGO_DB_NAME')
+                        string(credentialsId: 'mongodb-db-name', variable: 'ENV_MONGO_DB_NAME'),
+                        string(credentialsId: 'cloudflare-tunnel-token', variable: 'TOKEN_CF')
                     ]) {
                         sh """
                             echo "FLASK_ENV=production" > ./backend/.env
@@ -71,9 +72,11 @@ pipeline {
                     sh "docker rm -f loganalyze_fe || true"
                     // Tắt container cũ
                     sh "docker-compose down || true"
-                    
-                    sh "docker-compose up -d"
-                    
+
+                    sh """
+                        export CF_TUNNEL_TOKEN=${TOKEN_CF}
+                        docker-compose up -d
+                    """
                     // Dọn dẹp image rác
                     sh "docker image prune -f"
                 }

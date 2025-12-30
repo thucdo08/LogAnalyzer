@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Log Analyzer</title>
+    <script type="module" crossorigin src="/assets/index-UJphih5Q.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DYy-Icbz.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
+
+
+
+<!-- <!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Log Analyzer</title>
+    <link rel="icon" href="data:,">
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#f6f7f9; }
+      .card { background: #fff; border-radius: 14px; padding: 20px; box-shadow: 0 6px 18px rgba(0,0,0,.06); max-width: 960px; margin: 40px auto; }
+      .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+      button,input[type=file]{ font-size:15px; }
+      .btn { padding:10px 16px; border-radius:10px; border:1px solid #d0d7de; background:#0ea5e9; color:#fff; cursor:pointer }
+      .btn:disabled { opacity:.6; cursor:not-allowed; }
+      table { width:100%; border-collapse: collapse; margin-top:16px; }
+      th, td { padding:10px 8px; border-bottom:1px solid #eee; text-align:left; font-size:14px; }
+      .badge { display:inline-block; padding:2px 8px; border-radius: 999px; font-size:12px; font-weight:600; }
+      .INFO{ background:#e5f6ff; color:#0369a1; }
+      .WARNING{ background:#fff7ed; color:#c2410c;}
+      .CRITICAL{ background:#fee2e2; color:#991b1b;}
+      .muted { color:#6b7280; font-size:13px }
+      #chart { height:220px; margin-top:10px; display:flex; gap:6px; align-items:flex-end }
+      #chart > div { background:#cbd5e1; width: 24px; border-radius:6px 6px 0 0; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Import Files (.csv, .txt, .log, .json)</h2>
+      <div class="row" style="margin-top:10px">
+        <input id="file" type="file" accept=".csv,.txt,.log,.json"/>
+        <button id="uploadBtn" class="btn">Tải lên & Phân tích</button>
+        <span id="status" class="muted"></span>
+      </div>
+
+      <div id="preview" class="muted" style="margin-top:12px"></div>
+
+      <h3 style="margin-top:22px">Kết quả phân tích</h3>
+      <table id="resultTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Level</th>
+            <th>Tóm tắt</th>
+            <th>Gợi ý</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <h3 style="margin-top:22px">Thống kê mức độ</h3>
+      <div id="summary"></div>
+
+      <h3 style="margin-top:22px">Events per minute</h3>
+      <div id="chart" title="Số event mỗi phút (thanh cao = nhiều event hơn)"></div>
+    </div>
+
+    <script type="module">
+      const API_BASE = "http://localhost:8000";
+      const $ = (s) => document.querySelector(s);
+
+      const fileEl = $("#file");
+      const uploadBtn = $("#uploadBtn");
+      const statusEl = $("#status");
+      const previewEl = $("#preview");
+      const tbody = $("#resultTable tbody");
+      const summaryEl = $("#summary");
+      const chartEl = $("#chart");
+
+      function renderTable(rows) {
+        tbody.innerHTML = rows.map(r => `
+          <tr>
+            <td>${r.log_index}</td>
+            <td><span class="badge ${r.level}">${r.level}</span></td>
+            <td>${r.summary}</td>
+            <td>${r.suggestion}</td>
+          </tr>
+        `).join("");
+      }
+
+      function renderSummary(sum) {
+        const order = ["CRITICAL","WARNING","INFO"];
+        summaryEl.innerHTML = order
+          .filter(k => k in sum)
+          .map(k => `<span class="badge ${k}" style="margin-right:8px">${k}: ${sum[k]}</span>`)
+          .join("");
+      }
+
+      function renderChart(points) {
+        chartEl.innerHTML = "";
+        if (!points?.length) return;
+        const max = Math.max(...points.map(p => p.events_per_minute || 0)) || 1;
+        points.forEach(p => {
+          const h = Math.round(10 + (p.events_per_minute / max) * 190);
+          const bar = document.createElement("div");
+          bar.style.height = `${h}px`;
+          bar.title = `${p.timestamp} → ${p.events_per_minute}`;
+          chartEl.appendChild(bar);
+        });
+      }
+
+      uploadBtn.addEventListener("click", async () => {
+        const f = fileEl.files?.[0];
+        if (!f) { alert("Chọn một file CSV trước đã nhé."); return; }
+
+        uploadBtn.disabled = true;
+        statusEl.textContent = "Đang tải & phân tích...";
+        tbody.innerHTML = "";
+        summaryEl.innerHTML = "";
+        chartEl.innerHTML = "";
+        previewEl.textContent = "";
+
+        try {
+          const fd = new FormData();
+          fd.append("file", f);
+
+          const res = await fetch(`${API_BASE}/analyze`, {
+            method: "POST",
+            body: fd
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            throw new Error(data?.error || "API error");
+          }
+
+          if (data.preview?.length) {
+            previewEl.textContent = "Ví dụ dòng log: " + data.preview.join(" | ");
+          }
+          renderTable(data.results || []);
+          renderSummary(data.summary || {});
+          renderChart(data.events_per_minute || []);
+
+          statusEl.textContent = "Hoàn tất ✅";
+        } catch (e) {
+          console.error(e);
+          statusEl.textContent = "Lỗi: " + e.message;
+        } finally {
+          uploadBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html> -->
