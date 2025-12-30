@@ -65,18 +65,19 @@ pipeline {
                             echo "SAVE_OUTPUTS=false" >> ./backend/.env
                             echo "OUTPUT_DIR=./outputs" >> ./backend/.env
                         """
-                    }
-                    echo '--- Deploying with Docker Compose ---'
-                    
-                    sh "docker rm -f loganalyze_be || true"
-                    sh "docker rm -f loganalyze_fe || true"
-                    // Tắt container cũ
-                    sh "docker-compose down || true"
 
-                    sh """
-                        export CF_TUNNEL_TOKEN=${TOKEN_CF}
-                        docker-compose up -d
-                    """
+                        echo '--- Deploying with Docker Compose ---'
+                    
+                        sh "docker rm -f loganalyze_be || true"
+                        sh "docker rm -f loganalyze_fe || true"
+                        // Tắt container cũ
+                        sh "docker-compose down || true"
+
+                        sh """
+                            export CF_TUNNEL_TOKEN=${TOKEN_CF}
+                            docker-compose up -d
+                        """
+                    }
                     // Dọn dẹp image rác
                     sh "docker image prune -f"
                 }
