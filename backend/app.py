@@ -717,8 +717,31 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                 raw_score_max = max(a.get("score", 0) for a in alerts_group) if alerts_group else 0
                 
                 # === OPTION C: Cap Score and Severity for users without router correlation ===
-                # If no high-risk alerts, cap: Score <= 7.0, Severity = WARNING (not CRITICAL)
-                if not has_high_risk_alerts:
+                # EXCEPTIONS (high-confidence attack patterns exempt from capping):
+                # 1. External IP brute force attacks (external threats, not misconfigurations)
+                # 2. LSASS credential dumping (Mimikatz-style attacks - very high confidence)
+                # 3. Windows privilege escalation (psexec/encoded PowerShell)
+                
+                # Check if any alert has external IP flag
+                has_external_ip_attack = any(
+                    a.get("evidence", {}).get("is_external_ip", False)
+                    for a in alerts_group
+                )
+                
+                # Check for high-confidence Windows attack patterns
+                HIGH_CONFIDENCE_ATTACK_TYPES = [
+                    "lsass_credential_dumping_detected",
+                    "windows_privilege_escalation_detected",
+                    "schtask_persistence_detected",
+                    "service_persistence_detected",
+                ]
+                has_high_confidence_attack = any(
+                    a.get("type") in HIGH_CONFIDENCE_ATTACK_TYPES
+                    for a in alerts_group
+                )
+                
+                # If no high-risk alerts AND no exemptions, cap: Score <= 7.0, Severity = WARNING
+                if not has_high_risk_alerts and not has_external_ip_attack and not has_high_confidence_attack:
                     severity_max = "WARNING" if raw_severity_max == "CRITICAL" else raw_severity_max
                     score_max = min(raw_score_max, 7.0)
                     if raw_severity_max == "CRITICAL" or raw_score_max > 7.0:
@@ -726,6 +749,11 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                 else:
                     severity_max = raw_severity_max
                     score_max = raw_score_max
+                    if has_external_ip_attack:
+                        print(f"       → [Option C] EXEMPT: External IP attack detected, keeping {raw_severity_max}/{raw_score_max:.1f}")
+                    elif has_high_confidence_attack:
+                        attack_types = [a.get("type") for a in alerts_group if a.get("type") in HIGH_CONFIDENCE_ATTACK_TYPES]
+                        print(f"       → [Option C] EXEMPT: High-confidence attack ({attack_types[0]}), keeping {raw_severity_max}/{raw_score_max:.1f}")
                 
                 grouped_result = {
                     "subject": subject,

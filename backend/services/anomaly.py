@@ -1603,6 +1603,815 @@ def _detect_privilege_escalation(df: pd.DataFrame) -> List[Dict[str, Any]]:
         print(f"[DEBUG] Privilege escalation error: {e}", file=sys.stderr)
     return alerts
 
+def _detect_windows_lsass_dumping(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detects LSASS memory access attempts (Mimikatz, credential dumping).
+    
+    Pattern:
+    - Sysmon EventID=10 (Process Access)
+    - TargetImage contains "lsass.exe"
+    - GrantedAccess indicates memory read (0x1410, 0x1FFFFF, etc.)
+    """
+    import sys  # Required for debug output
+    import re
+    alerts = []
+    
+    if df.empty:
+        return alerts
+    
+    # Handle column name variations (EventID vs event_id)
+    event_id_col = None
+    for col in ["EventID", "event_id"]:
+        if col in df.columns:
+            event_id_col = col
+            break
+    
+    if event_id_col is None:
+        print(f"[DEBUG LSASS] No EventID/event_id column. Columns: {list(df.columns)[:15]}", file=sys.stderr)
+        return alerts
+    
+    print(f"[DEBUG LSASS] DataFrame has {len(df)} rows, using column '{event_id_col}'", file=sys.stderr)
+    
+    try:
+        # Filter for EventID=10 (Process Access)
+        eid_10_df = df[df[event_id_col].astype(str) == "10"].copy()
+        
+        print(f"[DEBUG LSASS] EventID=10 count: {len(eid_10_df)}", file=sys.stderr)
+        print(f"[DEBUG LSASS] Available columns: {list(eid_10_df.columns)}", file=sys.stderr)
+        
+        if eid_10_df.empty:
+            return alerts
+        
+        # Check if TargetImage is already a column (preprocess may have extracted it)
+        target_image_col = None
+        for col in ["TargetImage", "target_image", "targetimage"]:
+            if col in eid_10_df.columns:
+                target_image_col = col
+                break
+        
+        source_image_col = None
+        for col in ["SourceImage", "source_image", "sourceimage"]:
+            if col in eid_10_df.columns:
+                source_image_col = col
+                break
+        
+        user_col = None
+        for col in ["User", "user", "username"]:
+            if col in eid_10_df.columns:
+                user_col = col
+                break
+        
+        print(f"[DEBUG LSASS] Found columns: TargetImage={target_image_col}, SourceImage={source_image_col}, User={user_col}", file=sys.stderr)
+        
+        # If TargetImage column exists, use it directly
+        if target_image_col:
+            eid_10_df["_TargetImage"] = eid_10_df[target_image_col]
+            eid_10_df["_SourceImage"] = eid_10_df.get(source_image_col, "")
+            eid_10_df["_User"] = eid_10_df.get(user_col, "")
+            eid_10_df["_GrantedAccess"] = eid_10_df.get("GrantedAccess", eid_10_df.get("grantedaccess", ""))
+        else:
+            # Fallback: Try to extract from raw_line or message column
+            raw_col = None
+            for col in ["raw_line", "message", "raw"]:
+                if col in eid_10_df.columns:
+                    raw_col = col
+                    break
+            
+            if raw_col is None:
+                print(f"[DEBUG LSASS] No raw_line/message column found!", file=sys.stderr)
+                return alerts
+            
+            print(f"[DEBUG LSASS] Extracting from '{raw_col}' column", file=sys.stderr)
+            
+            # Check sample raw content
+            sample_raw = str(eid_10_df[raw_col].iloc[0])[:200] if len(eid_10_df) > 0 else ""
+            print(f"[DEBUG LSASS] Sample {raw_col}: {sample_raw}", file=sys.stderr)
+        
+            # Extract fields from raw_line using regex
+            def extract_field(msg, field_name):
+                """Extract quoted or unquoted value from key=value pattern."""
+                pattern = rf'{field_name}="([^"]+)"|{field_name}=(\S+)'
+                match = re.search(pattern, str(msg), re.IGNORECASE)
+                if match:
+                    return match.group(1) or match.group(2)
+                return None
+            
+            # Parse fields from raw_line
+            eid_10_df["_TargetImage"] = eid_10_df[raw_col].apply(lambda m: extract_field(m, "TargetImage"))
+            eid_10_df["_SourceImage"] = eid_10_df[raw_col].apply(lambda m: extract_field(m, "SourceImage"))
+            eid_10_df["_GrantedAccess"] = eid_10_df[raw_col].apply(lambda m: extract_field(m, "GrantedAccess"))
+            
+            # Debug: check extracted values
+            non_null_target = eid_10_df["_TargetImage"].notna().sum()
+            print(f"[DEBUG LSASS] Extracted TargetImage: {non_null_target} non-null values", file=sys.stderr)
+            
+            # Get User from column or raw_line
+            if user_col:
+                eid_10_df["_User"] = eid_10_df[user_col]
+            else:
+                eid_10_df["_User"] = eid_10_df[raw_col].apply(lambda m: extract_field(m, "User"))
+        
+        # Filter for LSASS access
+        lsass_access = eid_10_df[
+            eid_10_df["_TargetImage"].astype(str).str.contains("lsass.exe", case=False, na=False)
+        ].copy()
+        
+        print(f"[DEBUG LSASS] Found {len(lsass_access)} LSASS access events from {len(eid_10_df)} EventID=10", file=sys.stderr)
+        
+        if lsass_access.empty:
+            return alerts
+        
+        # Group by user and source process
+        for (user, src_image), group in lsass_access.groupby(["_User", "_SourceImage"]):
+            if pd.isna(user) or str(user).strip() in ["", "(unknown)", "None"]:
+                continue
+                
+            count = len(group)
+            src_ips = group.get("source_ip", group.get("SrcIp", pd.Series(index=group.index))).dropna().unique().tolist()
+            hosts = group.get("hostname", group.get("Host", pd.Series(index=group.index))).unique().tolist()
+            access_rights = group["_GrantedAccess"].dropna().unique().tolist()
+           
+            # Score based on count and process type
+            base_score = min(7.0 + (count / 10.0), 10.0)
+            
+            # Boost for suspicious processes
+            suspicious_processes = ["powershell.exe", "rundll32.exe", "cmd.exe", "wmic.exe", "msedge.exe"]
+            src_image_lower = str(src_image).lower()
+            is_suspicious_process = any(proc in src_image_lower for proc in suspicious_processes)
+            
+            if is_suspicious_process:
+                base_score = min(base_score + 2.0, 10.0)
+            
+            score = round(base_score, 2)
+            severity = "CRITICAL" if score >= 8.5 else "WARNING"
+            
+            alerts.append({
+                "type": "lsass_credential_dumping_detected",
+                "subject": str(user),
+                "severity": severity,
+                "score": float(score),
+                "text": f"[{severity}] LSASS memory access detected: User '{user}' accessed LSASS {count} time(s) using {src_image}",
+                "evidence": {
+                    "username": str(user),
+                    "access_count": int(count),
+                    "source_process": str(src_image),
+                    "access_rights": [str(ar) for ar in access_rights],
+                    "source_ips": [str(ip) for ip in src_ips if ip],
+                    "affected_hosts": [str(h) for h in hosts if h],
+                    "is_suspicious_process": is_suspicious_process
+                },
+                "prompt_ctx": {
+                    "user": str(user),
+                    "behavior": {"type": "lsass_credential_dumping"}
+                }
+            })
+        
+        print(f"[DEBUG LSASS] Generated {len(alerts)} alerts", file=sys.stderr)
+    
+    except Exception as e:
+        print(f"[DEBUG LSASS] Error: {e}", file=sys.stderr)
+    
+    return alerts
+
+def _detect_windows_privilege_escalation(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detects Windows privilege escalation attempts via lateral movement tools.
+    
+    Pattern:
+    - EventID=4672 (Special privileges assigned) + EventID=4688 (Process created)
+    - Suspicious processes: psexec.exe, encoded PowerShell
+    """
+    import sys
+    import re
+    alerts = []
+    
+    if df.empty:
+        return alerts
+    
+    # Handle column name variations (EventID vs event_id)
+    event_id_col = None
+    for col in ["EventID", "event_id"]:
+        if col in df.columns:
+            event_id_col = col
+            break
+    
+    if event_id_col is None:
+        return alerts
+    
+    # Handle User column name variations
+    user_col = None
+    for col in ["User", "user", "username"]:
+        if col in df.columns:
+            user_col = col
+            break
+    
+    if user_col is None:
+        print(f"[DEBUG PRIVESC] No user column found in: {list(df.columns)[:10]}", file=sys.stderr)
+        return alerts
+    
+    try:
+        # Filter for special privilege events and process creation
+        priv_events = df[df[event_id_col].astype(str) == "4672"].copy()
+        proc_events = df[df[event_id_col].astype(str) == "4688"].copy()
+        
+        print(f"[DEBUG PRIVESC] EventID=4672 count: {len(priv_events)}, EventID=4688 count: {len(proc_events)}", file=sys.stderr)
+        
+        if priv_events.empty or proc_events.empty:
+            return alerts
+        
+        # Handle NewProcessName column variations
+        proc_name_col = None
+        for col in ["NewProcessName", "new_process_name", "newprocessname"]:
+            if col in proc_events.columns:
+                proc_name_col = col
+                break
+        
+        # Handle CommandLine column variations
+        cmd_line_col = None
+        for col in ["CommandLine", "command_line", "commandline"]:
+            if col in proc_events.columns:
+                cmd_line_col = col
+                break
+        
+        print(f"[DEBUG PRIVESC] Columns: user={user_col}, proc_name={proc_name_col}, cmd_line={cmd_line_col}", file=sys.stderr)
+        
+        # If NewProcessName not found as column, extract from raw_line or message
+        if proc_name_col is None:
+            raw_col = "raw_line" if "raw_line" in proc_events.columns else "message" if "message" in proc_events.columns else None
+            if raw_col:
+                def extract_new_process_name(line):
+                    match = re.search(r'NewProcessName="([^"]+)"', str(line))
+                    if match:
+                        return match.group(1)
+                    return None
+                proc_events["_new_process_name"] = proc_events[raw_col].apply(extract_new_process_name)
+                proc_name_col = "_new_process_name"
+        
+        # If CommandLine not found as column, extract from raw_line or message
+        if cmd_line_col is None:
+            raw_col = "raw_line" if "raw_line" in proc_events.columns else "message" if "message" in proc_events.columns else None
+            if raw_col:
+                def extract_command_line(line):
+                    match = re.search(r'CommandLine="([^"]+)"', str(line))
+                    if match:
+                        return match.group(1)
+                    return None
+                proc_events["_command_line"] = proc_events[raw_col].apply(extract_command_line)
+                cmd_line_col = "_command_line"
+        
+        if proc_name_col is None:
+            print(f"[DEBUG PRIVESC] No NewProcessName column or extraction method available", file=sys.stderr)
+            return alerts
+        
+        # Ensure user column is consistently named for merge
+        priv_events["_user"] = priv_events[user_col]
+        proc_events["_user"] = proc_events[user_col]
+        
+        # Sort by timestamp for merge_asof
+        priv_events = priv_events.sort_values("timestamp")
+        proc_events = proc_events.sort_values("timestamp")
+        
+        # Join privilege events with process creation (within 10 seconds)
+        merged = pd.merge_asof(
+            priv_events,
+            proc_events,
+            on="timestamp",
+            by="_user",  # Use normalized _user column
+            direction="forward",
+            tolerance=pd.Timedelta(seconds=10),
+            suffixes=("_priv", "_proc")
+        )
+        
+        print(f"[DEBUG PRIVESC] Merged {len(merged)} events, proc_name_col={proc_name_col}, cmd_line_col={cmd_line_col}", file=sys.stderr)
+        
+        # Get the right column names (after merge they might have suffix)
+        proc_name_col_merged = proc_name_col + "_proc" if proc_name_col + "_proc" in merged.columns else proc_name_col
+        cmd_line_col_merged = cmd_line_col + "_proc" if cmd_line_col and cmd_line_col + "_proc" in merged.columns else (cmd_line_col if cmd_line_col else None)
+        
+        # Filter for suspicious processes
+        proc_col = merged.get(proc_name_col_merged, pd.Series("", index=merged.index)).astype(str)
+        cmd_col = merged.get(cmd_line_col_merged, pd.Series("", index=merged.index)).astype(str) if cmd_line_col_merged else pd.Series("", index=merged.index)
+        
+        suspicious_mask = (
+            (proc_col.str.contains("psexec.exe", case=False, na=False)) |
+            (proc_col.str.contains("powershell.exe", case=False, na=False) & cmd_col.str.contains("-enc", case=False, na=False)) |
+            (proc_col.str.contains("wmic.exe", case=False, na=False)) |
+            (cmd_col.str.contains("whoami|net user|net group|\\\\\\\\", case=False, na=False, regex=True))  # Added psexec lateral movement pattern
+        )
+        
+        merged = merged[suspicious_mask]
+        
+        print(f"[DEBUG PRIVESC] After suspicious filter: {len(merged)} events", file=sys.stderr)
+        
+        if merged.empty:
+            return alerts
+        
+        # Group by user
+        for user, group in merged.groupby("_user"):
+            if pd.isna(user) or str(user).strip() in ["", "(unknown)"]:
+                continue
+                
+            count = len(group)
+            processes = group.get(proc_name_col_merged, pd.Series(index=group.index)).dropna().unique().tolist()
+            hosts_priv = group.get("host_priv", group.get("Host_priv", pd.Series(index=group.index))).unique().tolist()
+            src_ips = group.get("source_ip_priv", group.get("SrcIp_priv", pd.Series(index=group.index))).dropna().unique().tolist()
+            
+            # Detect encoded PowerShell
+            cmd_vals = group.get(cmd_line_col_merged, pd.Series("", index=group.index)).astype(str) if cmd_line_col_merged else pd.Series("", index=group.index)
+            proc_vals = group.get(proc_name_col_merged, pd.Series("", index=group.index)).astype(str)
+            
+            has_encoded_ps = cmd_vals.str.contains("-enc", case=False, na=False).any()
+            has_psexec = proc_vals.str.contains("psexec", case=False, na=False).any()
+            
+            # Scoring
+            base_score = min(7.5 + (count / 5.0), 10.0)
+            
+            if has_psexec:
+                base_score = min(base_score + 1.5, 10.0)
+            if has_encoded_ps:
+                base_score = min(base_score + 1.0, 10.0)
+            
+            score = round(base_score, 2)
+            severity = "CRITICAL" if score >= 8.0 else "WARNING"
+            
+            alerts.append({
+                "type": "windows_privilege_escalation_detected",
+                "subject": str(user),
+                "severity": severity,
+                "score": float(score),
+                "text": f"[{severity}] Windows privilege escalation detected: User '{user}' executed {count} suspicious privileged process(es)",
+                "evidence": {
+                    "username": str(user),
+                    "escalation_count": int(count),
+                    "processes": [str(p) for p in processes],
+                    "has_psexec": bool(has_psexec),
+                    "has_encoded_powershell": bool(has_encoded_ps),
+                    "source_ips": [str(ip) for ip in src_ips],
+                    "affected_hosts": [str(h) for h in hosts_priv]
+                },
+                "prompt_ctx": {
+                    "user": str(user),
+                    "behavior": {"type": "windows_privilege_escalation"}
+                }
+            })
+    
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Windows privilege escalation detection error: {e}", file=sys.stderr)
+    
+    return alerts
+
+
+def _detect_windows_schtask_persistence(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detects Windows scheduled task persistence attacks.
+    
+    Pattern:
+    - EventID=4698 (Scheduled task created) in Security channel
+    - Suspicious actions: hidden PowerShell (-enc, -WindowStyle Hidden), 
+      executables in Temp folders, or scripts running from suspicious paths
+    - Task names masquerading as Windows updates/maintenance
+    
+    MITRE ATT&CK: T1053.005 (Scheduled Task/Job)
+    """
+    import sys
+    alerts = []
+    
+    if df.empty:
+        return alerts
+    
+    # Handle column name variations
+    event_id_col = None
+    for col in ["EventID", "event_id"]:
+        if col in df.columns:
+            event_id_col = col
+            break
+    
+    if event_id_col is None:
+        return alerts
+    
+    try:
+        # Filter for EventID 4698 (Scheduled task created)
+        schtask_events = df[df[event_id_col].astype(str) == "4698"].copy()
+        
+        if schtask_events.empty:
+            return alerts
+        
+        print(f"[DEBUG SCHTASK] Found {len(schtask_events)} scheduled task creation events", file=sys.stderr)
+        
+        # Find user column
+        user_col = None
+        for col in ["User", "username", "user.name"]:
+            if col in schtask_events.columns:
+                user_col = col
+                break
+        
+        # Find taskname and action columns (from parsed fields or message/raw_line)
+        taskname_col = None
+        for col in ["TaskName", "task_name"]:
+            if col in schtask_events.columns:
+                taskname_col = col
+                break
+        
+        action_col = None
+        for col in ["Action", "action"]:
+            if col in schtask_events.columns:
+                action_col = col
+                break
+        
+        # Extract TaskName and Action from raw_line or message if not available
+        def extract_from_message(row):
+            msg = ""
+            if "raw_line" in row and pd.notna(row.get("raw_line")):
+                msg = str(row["raw_line"])
+            elif "message" in row and pd.notna(row.get("message")):
+                msg = str(row["message"])
+            
+            task_name = None
+            action = None
+            
+            # Extract TaskName
+            tn_match = re.search(r'TaskName="([^"]+)"', msg)
+            if tn_match:
+                task_name = tn_match.group(1)
+            
+            # Extract Action
+            action_match = re.search(r'Action="([^"]+)"', msg)
+            if action_match:
+                action = action_match.group(1)
+            
+            return pd.Series([task_name, action])
+        
+        if taskname_col is None or action_col is None:
+            extracted = schtask_events.apply(extract_from_message, axis=1)
+            extracted.columns = ["_task_name", "_action"]
+            schtask_events = pd.concat([schtask_events, extracted], axis=1)
+            taskname_col = "_task_name" if taskname_col is None else taskname_col
+            action_col = "_action" if action_col is None else action_col
+        
+        # Define suspicious patterns
+        SUSPICIOUS_ACTION_PATTERNS = [
+            r"-enc\s+[A-Za-z0-9+/=]+",                    # Encoded PowerShell
+            r"-EncodedCommand\s+[A-Za-z0-9+/=]+",         # Another encoded PS form
+            r"-WindowStyle\s+Hidden",                      # Hidden window
+            r"C:\\Windows\\Temp\\.*\.exe",                 # Exe in Temp
+            r"C:\\Users\\.*\\AppData\\.*\.exe",            # Exe in AppData
+            r"powershell\.exe.*(-w\s+h|-nop|-ep\s+bypass)", # Bypass execution policy
+            r"cmd\.exe.*/c.*powershell",                   # cmd launching powershell
+            r"regsvr32.*(/s|/u)",                          # Silent regsvr32
+            r"mshta.*http[s]?://",                         # Remote HTA
+            r"rundll32.*,\s*#",                            # suspicious rundll32
+            r"svc\.exe",                                   # Common malware name
+            r"update\.exe.*-run",                          # Suspicious update pattern
+        ]
+        
+        # Task names that look like masquerading
+        LEGITIMATE_TASK_PATTERNS = [
+            r"\\Microsoft\\Windows\\",
+            r"WinUpdate",
+            r"Telemetry",
+            r"OneDrive",
+            r"Index",
+            r"Sync",
+        ]
+        
+        suspicious_tasks = []
+        
+        for idx, row in schtask_events.iterrows():
+            task_name = str(row.get(taskname_col, "")) if pd.notna(row.get(taskname_col)) else ""
+            action = str(row.get(action_col, "")) if pd.notna(row.get(action_col)) else ""
+            user = str(row.get(user_col, "unknown")) if user_col and pd.notna(row.get(user_col)) else "unknown"
+            host = str(row.get("Host", row.get("host", "unknown")))
+            timestamp = row.get("timestamp")
+            
+            # Check if action is suspicious
+            is_suspicious = False
+            suspicious_indicators = []
+            
+            for pattern in SUSPICIOUS_ACTION_PATTERNS:
+                if re.search(pattern, action, re.IGNORECASE):
+                    is_suspicious = True
+                    suspicious_indicators.append(pattern.replace("\\", "").replace(".*", "*"))
+                    break
+            
+            # Check if task name is masquerading as Windows task
+            is_masquerading = False
+            for pattern in LEGITIMATE_TASK_PATTERNS:
+                if re.search(pattern, task_name, re.IGNORECASE):
+                    is_masquerading = True
+                    break
+            
+            # Flag if both suspicious action AND masquerading name
+            if is_suspicious or (action and is_masquerading):
+                suspicious_tasks.append({
+                    "user": user,
+                    "host": host,
+                    "task_name": task_name,
+                    "action": action[:200] if len(action) > 200 else action,  # Truncate long actions
+                    "timestamp": timestamp,
+                    "is_masquerading": is_masquerading,
+                    "indicators": suspicious_indicators
+                })
+        
+        print(f"[DEBUG SCHTASK] Found {len(suspicious_tasks)} suspicious scheduled tasks", file=sys.stderr)
+        
+        if not suspicious_tasks:
+            return alerts
+        
+        # Group by user
+        from collections import defaultdict
+        user_tasks = defaultdict(list)
+        for task in suspicious_tasks:
+            user_tasks[task["user"]].append(task)
+        
+        for user, tasks in user_tasks.items():
+            count = len(tasks)
+            hosts = list(set(t["host"] for t in tasks))
+            task_names = list(set(t["task_name"][:50] for t in tasks))[:5]
+            
+            # Check for high-risk patterns
+            has_encoded_ps = any("-enc" in t["action"].lower() for t in tasks)
+            has_temp_exe = any(re.search(r"Temp\\.*\.exe", t["action"], re.IGNORECASE) for t in tasks)
+            has_hidden_window = any("-windowstyle" in t["action"].lower() for t in tasks)
+            
+            # Scoring
+            base_score = min(7.0 + (count / 3.0), 10.0)
+            
+            if has_encoded_ps:
+                base_score = min(base_score + 1.5, 10.0)
+            if has_temp_exe:
+                base_score = min(base_score + 1.0, 10.0)
+            if has_hidden_window:
+                base_score = min(base_score + 0.5, 10.0)
+            
+            score = round(base_score, 2)
+            severity = "CRITICAL" if score >= 8.0 else "WARNING"
+            
+            alerts.append({
+                "type": "schtask_persistence_detected",
+                "subject": user,
+                "severity": severity,
+                "score": float(score),
+                "text": f"[{severity}] Scheduled task persistence detected: User '{user}' created {count} suspicious scheduled task(s) with malicious patterns",
+                "evidence": {
+                    "username": user,
+                    "task_count": count,
+                    "task_names": task_names,
+                    "has_encoded_powershell": has_encoded_ps,
+                    "has_temp_executable": has_temp_exe,
+                    "has_hidden_window": has_hidden_window,
+                    "affected_hosts": hosts,
+                    "sample_actions": [t["action"][:100] for t in tasks[:3]]
+                },
+                "prompt_ctx": {
+                    "user": user,
+                    "behavior": {"type": "schtask_persistence"}
+                }
+            })
+        
+        print(f"[DEBUG SCHTASK] Generated {len(alerts)} alerts", file=sys.stderr)
+    
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Scheduled task persistence detection error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+    
+    return alerts
+
+
+def _detect_windows_service_persistence(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detects Windows service persistence attacks.
+    
+    Pattern:
+    - EventID=7045 (A service was installed in the system) in System channel
+    - Suspicious ImagePaths: executables in Temp folders, ProgramData, 
+      or masquerading as Windows binaries
+    - Fake service names mimicking Windows updates
+    
+    MITRE ATT&CK: T1543.003 (Create or Modify System Process: Windows Service)
+    """
+    import sys
+    alerts = []
+    
+    if df.empty:
+        return alerts
+    
+    # Handle column name variations
+    event_id_col = None
+    for col in ["EventID", "event_id"]:
+        if col in df.columns:
+            event_id_col = col
+            break
+    
+    if event_id_col is None:
+        return alerts
+    
+    try:
+        # Filter for EventID 7045 (Service installed)
+        svc_events = df[df[event_id_col].astype(str) == "7045"].copy()
+        
+        if svc_events.empty:
+            return alerts
+        
+        print(f"[DEBUG SVCPERSIST] Found {len(svc_events)} service installation events", file=sys.stderr)
+        
+        # Find user column
+        user_col = None
+        for col in ["User", "username", "user.name"]:
+            if col in svc_events.columns:
+                user_col = col
+                break
+        
+        # Find ServiceName and ImagePath columns
+        svc_name_col = None
+        for col in ["ServiceName", "service_name"]:
+            if col in svc_events.columns:
+                svc_name_col = col
+                break
+        
+        image_path_col = None
+        for col in ["ImagePath", "image_path", "ServiceImagePath"]:
+            if col in svc_events.columns:
+                image_path_col = col
+                break
+        
+        # Extract from raw_line or message if columns not available
+        def extract_from_message(row):
+            msg = ""
+            if "raw_line" in row and pd.notna(row.get("raw_line")):
+                msg = str(row["raw_line"])
+            elif "message" in row and pd.notna(row.get("message")):
+                msg = str(row["message"])
+            
+            service_name = None
+            image_path = None
+            
+            # Extract ServiceName
+            sn_match = re.search(r'ServiceName="([^"]+)"', msg)
+            if sn_match:
+                service_name = sn_match.group(1)
+            
+            # Extract ImagePath
+            ip_match = re.search(r'ImagePath="([^"]+)"', msg)
+            if ip_match:
+                image_path = ip_match.group(1)
+            
+            return pd.Series([service_name, image_path])
+        
+        if svc_name_col is None or image_path_col is None:
+            extracted = svc_events.apply(extract_from_message, axis=1)
+            extracted.columns = ["_service_name", "_image_path"]
+            svc_events = pd.concat([svc_events, extracted], axis=1)
+            svc_name_col = "_service_name" if svc_name_col is None else svc_name_col
+            image_path_col = "_image_path" if image_path_col is None else image_path_col
+        
+        # Define suspicious patterns
+        SUSPICIOUS_PATH_PATTERNS = [
+            r"C:\\Windows\\Temp\\.*\.exe",           # Exe in Windows Temp
+            r"C:\\Users\\.*\\AppData\\.*\.exe",      # Exe in user AppData
+            r"C:\\ProgramData\\(?!Microsoft).*\.exe", # Exe in ProgramData (non-Microsoft)
+            r"C:\\Temp\\.*\.exe",                    # Exe in C:\Temp
+            r"updsvc\.exe",                          # Known malware name
+            r"winupd\.exe",                          # Known malware name
+            r"svc\.exe",                             # Common malware name
+            r"-enc\s+[A-Za-z0-9+/=]+",               # Encoded PowerShell in path
+            r"powershell.*-enc",                     # PowerShell with encoding
+        ]
+        
+        # Suspicious service name patterns (fake Windows services)
+        SUSPICIOUS_NAME_PATTERNS = [
+            r"Update_\d+",                            # Fake update service
+            r"WindowsUpdate\d+",                      # Fake Windows update
+            r"WinUpdate\d*",                          # Fake Windows update
+            r"SvcHost\d+",                            # Fake svchost
+            r"System\d+",                             # Fake system service
+        ]
+        
+        # Legitimate-looking but suspicious when coming from non-standard paths
+        MASQUERADE_BINARIES = [
+            "svchost.exe",
+            "services.exe",
+            "lsass.exe",
+        ]
+        
+        suspicious_services = []
+        
+        for idx, row in svc_events.iterrows():
+            svc_name = str(row.get(svc_name_col, "")) if pd.notna(row.get(svc_name_col)) else ""
+            image_path = str(row.get(image_path_col, "")) if pd.notna(row.get(image_path_col)) else ""
+            user = str(row.get(user_col, "unknown")) if user_col and pd.notna(row.get(user_col)) else "unknown"
+            host = str(row.get("Host", row.get("host", "unknown")))
+            timestamp = row.get("timestamp")
+            
+            is_suspicious = False
+            suspicious_indicators = []
+            
+            # Check if image path is suspicious
+            for pattern in SUSPICIOUS_PATH_PATTERNS:
+                if re.search(pattern, image_path, re.IGNORECASE):
+                    is_suspicious = True
+                    suspicious_indicators.append(f"suspicious_path:{pattern[:20]}")
+                    break
+            
+            # Check if service name is suspicious
+            for pattern in SUSPICIOUS_NAME_PATTERNS:
+                if re.search(pattern, svc_name, re.IGNORECASE):
+                    is_suspicious = True
+                    suspicious_indicators.append(f"fake_service_name:{svc_name}")
+                    break
+                    
+            # Check for masquerading (legitimate exe from non-standard path)
+            for masq in MASQUERADE_BINARIES:
+                if masq.lower() in image_path.lower():
+                    # Legitimate paths for these binaries
+                    legitimate_paths = [
+                        r"C:\\Windows\\system32\\",
+                        r"C:\\Windows\\SysWOW64\\"
+                    ]
+                    is_legit = any(re.search(lp, image_path, re.IGNORECASE) for lp in legitimate_paths)
+                    if not is_legit:
+                        is_suspicious = True
+                        suspicious_indicators.append(f"masquerading:{masq}")
+            
+            if is_suspicious:
+                suspicious_services.append({
+                    "user": user,
+                    "host": host,
+                    "service_name": svc_name,
+                    "image_path": image_path[:200] if len(image_path) > 200 else image_path,
+                    "timestamp": timestamp,
+                    "indicators": suspicious_indicators
+                })
+        
+        print(f"[DEBUG SVCPERSIST] Found {len(suspicious_services)} suspicious services", file=sys.stderr)
+        
+        if not suspicious_services:
+            return alerts
+        
+        # Group by user
+        from collections import defaultdict
+        user_services = defaultdict(list)
+        for svc in suspicious_services:
+            user_services[svc["user"]].append(svc)
+        
+        for user, services in user_services.items():
+            count = len(services)
+            hosts = list(set(s["host"] for s in services))
+            service_names = list(set(s["service_name"][:30] for s in services))[:5]
+            
+            # Check for high-risk patterns
+            has_temp_exe = any(re.search(r"Temp\\.*\.exe", s["image_path"], re.IGNORECASE) for s in services)
+            has_fake_update = any("Update_" in s["service_name"] for s in services)
+            has_programdata = any("ProgramData" in s["image_path"] for s in services)
+            
+            # Scoring
+            base_score = min(7.0 + (count / 3.0), 10.0)
+            
+            if has_temp_exe:
+                base_score = min(base_score + 1.5, 10.0)
+            if has_fake_update:
+                base_score = min(base_score + 1.0, 10.0)
+            if has_programdata:
+                base_score = min(base_score + 0.5, 10.0)
+            
+            score = round(base_score, 2)
+            severity = "CRITICAL" if score >= 8.0 else "WARNING"
+            
+            alerts.append({
+                "type": "service_persistence_detected",
+                "subject": user,
+                "severity": severity,
+                "score": float(score),
+                "text": f"[{severity}] Service persistence detected: User '{user}' installed {count} suspicious service(s) with malicious patterns",
+                "evidence": {
+                    "username": user,
+                    "service_count": count,
+                    "service_names": service_names,
+                    "has_temp_executable": has_temp_exe,
+                    "has_fake_update_name": has_fake_update,
+                    "has_programdata_exe": has_programdata,
+                    "affected_hosts": hosts,
+                    "sample_paths": [s["image_path"][:80] for s in services[:3]]
+                },
+                "prompt_ctx": {
+                    "user": user,
+                    "behavior": {"type": "service_persistence"}
+                }
+            })
+        
+        print(f"[DEBUG SVCPERSIST] Generated {len(alerts)} alerts", file=sys.stderr)
+    
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Service persistence detection error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+    
+    return alerts
+
+
 def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """
     Detect SSH lateral movement - USER-CENTRIC detection.
@@ -3508,17 +4317,33 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
     # Router logs get Cisco IOS pattern-based detection (BGP, OSPF, Interface, Config)
     alerts.extend(_detect_router_anomalies(df))
 
+    # ===== WINDOWS-SPECIFIC ATTACK DETECTIONS =====
+    # Windows Security & Sysmon logs - LSASS dumping and privilege escalation
+    alerts.extend(_detect_windows_lsass_dumping(df))
+    alerts.extend(_detect_windows_privilege_escalation(df))
+
     # ===== SECTION 0: ENHANCED DETECTION FOR MIXED LOGS =====
 
     
-    # 0A) SSH Brute Force Detection - detect rapid SSH attempts
+    # 0A) Credential Brute Force Detection - detect rapid login attempts (SSH, RDP, Windows Logon, etc.)
     if "action" in df.columns and "status" in df.columns and "username" in df.columns:
         try:
-            ssh_logs = df[df.get("program", pd.Series(index=df.index)).astype(str).str.contains("sshd", case=False, na=False) |
+            # Helper function to check if IP is external (not RFC1918 private)
+            def is_external_ip(ip_str: str) -> bool:
+                """Check if IP is external (public) IP address."""
+                try:
+                    import ipaddress
+                    ip = ipaddress.ip_address(ip_str)
+                    # Check if IP is in private ranges (RFC1918)
+                    return not ip.is_private
+                except Exception:
+                    return False
+            
+            login_logs = df[df.get("program", pd.Series(index=df.index)).astype(str).str.contains("sshd", case=False, na=False) |
                          df.get("action", pd.Series(index=df.index)).astype(str).str.contains("login|logon", case=False, na=False)]
-            if not ssh_logs.empty:
+            if not login_logs.empty:
                 # Group by source IP and count failures/attempts
-                for src_ip, group in ssh_logs.groupby("source_ip"):
+                for src_ip, group in login_logs.groupby("source_ip"):
                     if pd.isna(src_ip) or str(src_ip).strip() == "":
                         continue
                     src_ip = str(src_ip)
@@ -3530,21 +4355,55 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                     if total >= 5 and len(failed) >= 3:  # at least 3 failures in 5+ attempts
                         failure_rate = len(failed) / total
                         if failure_rate >= 0.4:  # 40%+ failure rate
+                            # Check if IP is external (public)
+                            is_external = is_external_ip(src_ip)
+                            
+                            # Calculate base score
+                            base_score = min(failure_rate * 10, 10.0)
+                            
+                            # BOOST SEVERITY FOR EXTERNAL IPs
+                            # External brute force is almost always malicious, not misconfiguration
+                            if is_external and failure_rate >= 0.9:
+                                # Override Option C capping for high-confidence external attacks
+                                score = max(base_score, 9.0)
+                                severity = "CRITICAL"
+                                reason = f"High login failure rate from EXTERNAL IP {src_ip} (likely attack)"
+                            elif failure_rate > 0.7:
+                                score = base_score
+                                severity = "CRITICAL" if is_external else "WARNING"
+                                reason = f"High login failure rate from {'EXTERNAL' if is_external else 'internal'} IP {src_ip}"
+                            else:
+                                score = base_score
+                                severity = "WARNING"
+                                reason = f"High login failure rate from {src_ip}"
+                            
                             ctx = {
                                 "user": None,
                                 "group": None,
-                                "behavior": {"type": "ssh_bruteforce", "source_ip": src_ip, "attempts": total, "failures": len(failed)},
+                                "behavior": {
+                                    "type": "credential_bruteforce", 
+                                    "source_ip": src_ip, 
+                                    "attempts": total, 
+                                    "failures": len(failed),
+                                    "is_external": is_external
+                                },
                                 "time": None,
                                 "baseline": {"expected_failure_rate": 0.1},
-                                "extras": {"reason": f"High SSH login failure rate from {src_ip}"},
+                                "extras": {"reason": reason},
                             }
                             alerts.append({
-                                "type": "ssh_bruteforce_detected",
+                                "type": "credential_bruteforce_detected",
                                 "subject": src_ip,
-                                "severity": "CRITICAL" if failure_rate > 0.7 else "WARNING",
-                                "score": min(failure_rate * 10, 10.0),
-                                "text": f"SSH brute force detected from IP {src_ip}: {len(failed)}/{total} failed attempts ({failure_rate:.1%} failure rate).",
-                                "evidence": {"source_ip": src_ip, "total_attempts": int(total), "failed_attempts": int(len(failed)), "failure_rate": float(failure_rate)},
+                                "severity": severity,
+                                "score": float(score),
+                                "text": f"Credential brute force detected from {'EXTERNAL' if is_external else 'internal'} IP {src_ip}: {len(failed)}/{total} failed attempts ({failure_rate:.1%} failure rate).",
+                                "evidence": {
+                                    "source_ip": src_ip, 
+                                    "total_attempts": int(total), 
+                                    "failed_attempts": int(len(failed)), 
+                                    "failure_rate": float(failure_rate),
+                                    "is_external_ip": is_external
+                                },
                                 "prompt_ctx": ctx,
                             })
         except Exception:
@@ -4622,6 +5481,31 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
     # NEW: Privilege escalation detection (non-admin users running privileged operations)
     priv_esc_alerts = _detect_privilege_escalation(df)
     alerts.extend(priv_esc_alerts)
+
+    # NEW: Windows-specific attack detection (when Windows Event Log format detected)
+    # Check for Windows log indicators: EventID column, Security/Sysmon Channel
+    has_windows_logs = False
+    for col in ["EventID", "event_id"]:
+        if col in df.columns:
+            has_windows_logs = True
+            break
+    
+    if has_windows_logs:
+        # LSASS credential dumping detection (Mimikatz, credential theft)
+        lsass_alerts = _detect_windows_lsass_dumping(df)
+        alerts.extend(lsass_alerts)
+        
+        # Windows privilege escalation (psexec, encoded PowerShell)
+        win_priv_esc_alerts = _detect_windows_privilege_escalation(df)
+        alerts.extend(win_priv_esc_alerts)
+        
+        # Scheduled task persistence detection
+        schtask_alerts = _detect_windows_schtask_persistence(df)
+        alerts.extend(schtask_alerts)
+        
+        # Service persistence detection (malicious services installed)
+        svc_persist_alerts = _detect_windows_service_persistence(df)
+        alerts.extend(svc_persist_alerts)
 
     return alerts
 
