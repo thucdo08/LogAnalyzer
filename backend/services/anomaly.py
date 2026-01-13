@@ -2911,6 +2911,539 @@ def _detect_edr_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = 
     
     return alerts
 
+
+# ==============================================================================
+# Router/Network Infrastructure Anomaly Detection
+# ==============================================================================
+
+def _detect_router_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Detect router/network infrastructure attacks based on Cisco IOS syslog patterns.
+    
+    Enhanced with User Correlation:
+    - Extracts login events (SEC_LOGIN) and config events (CONFIG_I)
+    - Builds user timeline per router
+    - Attributes infrastructure attacks to users who were active within correlation window
+    
+    Detections:
+    1. BGP Flap Attack - Rapid BGP neighbor down events indicating route hijacking/instability
+    2. Interface Flap Attack - Rapid interface up/down events indicating physical layer issues
+    3. Config Tampering - Unauthorized configuration changes via VTY
+    4. OSPF Storm - Rapid OSPF adjacency changes indicating routing attack
+    
+    Args:
+        df: DataFrame containing router syslog entries
+        
+    Returns:
+        List of alert dictionaries with type, subject (user or router), severity, score, text, evidence
+    """
+    alerts: List[Dict[str, Any]] = []
+    
+    if df is None or df.empty:
+        return alerts
+    
+    # Check if this is router log data
+    is_router_log = False
+    msg_col = "message" if "message" in df.columns else None
+    host_col = "hostname" if "hostname" in df.columns else ("host" if "host" in df.columns else None)
+    
+    if msg_col:
+        # Check for Cisco IOS patterns
+        sample_msgs = df[msg_col].astype(str).head(100).str.cat(sep=' ')
+        router_indicators = [
+            r'%BGP-\d+-',
+            r'%OSPF-\d+-',
+            r'%LINK-\d+-',
+            r'%LINEPROTO-\d+-',
+            r'%SYS-\d+-CONFIG_I',
+            r'%SEC_LOGIN-\d+-',
+            r'ios\[',
+            r'rtr-\w+'
+        ]
+        for pattern in router_indicators:
+            if re.search(pattern, sample_msgs, re.IGNORECASE):
+                is_router_log = True
+                break
+    
+    if not is_router_log:
+        return alerts
+    
+    # Extract time window for rate calculations
+    time_window_minutes = 60
+    if "timestamp" in df.columns:
+        try:
+            timestamps = pd.to_datetime(df["timestamp"], errors='coerce', utc=True)
+            valid_ts = timestamps.dropna()
+            if len(valid_ts) >= 2:
+                time_window_minutes = (valid_ts.max() - valid_ts.min()).total_seconds() / 60
+                if time_window_minutes < 1:
+                    time_window_minutes = 1
+        except:
+            pass
+    
+    # =========================================================================
+    # STEP 1: Extract User Activity Events (Login + Config)
+    # =========================================================================
+    
+    # Pattern for SEC_LOGIN: %SEC_LOGIN-5-LOGIN_SUCCESS: Login Success [user:X] [Source:Y] [VTY] device=Z
+    login_pattern = r'%SEC_LOGIN-\d+-LOGIN_SUCCESS.*\[user:(\S+)\].*\[Source:([\d\.]+)\]'
+    
+    # Pattern for CONFIG_I: %SYS-5-CONFIG_I: Configured from vty by USER (IP) using device DEV
+    config_pattern = r'%SYS-\d+-CONFIG_I.*Configured\s+from\s+(\w+)\s+by\s+(\S+)\s*\(?([\d\.]+)?'
+    
+    # Store user activity per router: {router: [(timestamp, user, source_ip, event_type), ...]}
+    user_activity_by_router = {}
+    
+    for idx, row in df.iterrows():
+        msg = str(row.get(msg_col, "")) if msg_col else ""
+        router = str(row.get(host_col, "unknown")) if host_col else "unknown"
+        timestamp = row.get("timestamp")
+        
+        # Check for login event
+        login_match = re.search(login_pattern, msg, re.IGNORECASE)
+        if login_match:
+            username = login_match.group(1)
+            source_ip = login_match.group(2)
+            if router not in user_activity_by_router:
+                user_activity_by_router[router] = []
+            user_activity_by_router[router].append({
+                "timestamp": timestamp,
+                "user": username,
+                "source_ip": source_ip,
+                "event_type": "login"
+            })
+            continue
+        
+        # Check for config event
+        config_match = re.search(config_pattern, msg, re.IGNORECASE)
+        if config_match:
+            username = config_match.group(2)
+            source_ip = config_match.group(3) if config_match.group(3) else "unknown"
+            if router not in user_activity_by_router:
+                user_activity_by_router[router] = []
+            user_activity_by_router[router].append({
+                "timestamp": timestamp,
+                "user": username,
+                "source_ip": source_ip,
+                "event_type": "config"
+            })
+    
+    # Helper function to find users active on router within time window
+    def find_correlated_users(router: str, event_timestamp, correlation_minutes: int = 5) -> List[dict]:
+        """Find users who were active on this router within correlation_minutes before event."""
+        if router not in user_activity_by_router:
+            return []
+        
+        correlated = []
+        try:
+            event_ts = pd.to_datetime(event_timestamp, utc=True)
+            if pd.isna(event_ts):
+                return []
+            
+            for activity in user_activity_by_router[router]:
+                activity_ts = pd.to_datetime(activity["timestamp"], utc=True)
+                if pd.isna(activity_ts):
+                    continue
+                
+                # Check if activity happened within correlation_minutes before the event
+                time_diff = (event_ts - activity_ts).total_seconds() / 60
+                if 0 <= time_diff <= correlation_minutes:
+                    correlated.append({
+                        "user": activity["user"],
+                        "source_ip": activity["source_ip"],
+                        "event_type": activity["event_type"],
+                        "minutes_before": round(time_diff, 1)
+                    })
+        except:
+            pass
+        
+        return correlated
+    
+    # =========================================================================
+    # STEP 2: Collect All Infrastructure Events with Timestamps
+    # =========================================================================
+    
+    # BGP Flap events
+    bgp_down_pattern = r'%BGP-\d+-ADJCHANGE.*neighbor\s+([\d\.]+)\s+Down'
+    bgp_events = []
+    
+    # Interface Flap events
+    interface_pattern = r'%(LINK|LINEPROTO)-\d+-UPDOWN.*Interface\s+(\S+).*changed\s+state\s+to\s+(up|down)'
+    interface_events = []
+    
+    # OSPF Storm events
+    ospf_pattern = r'%OSPF-\d+-ADJCHG.*Nbr\s+([\d\.]+)\s+on\s+(\S+)\s+from\s+(\w+)\s+to\s+(\w+)'
+    ospf_events = []
+    
+    # Config Tampering events (already captured above, collect here for alerting)
+    config_events = []
+    
+    for idx, row in df.iterrows():
+        msg = str(row.get(msg_col, "")) if msg_col else ""
+        router = str(row.get(host_col, "unknown")) if host_col else "unknown"
+        timestamp = row.get("timestamp")
+        
+        # BGP Down
+        bgp_match = re.search(bgp_down_pattern, msg, re.IGNORECASE)
+        if bgp_match:
+            bgp_events.append({
+                "router": router,
+                "neighbor": bgp_match.group(1),
+                "timestamp": timestamp
+            })
+            continue
+        
+        # Interface state change
+        iface_match = re.search(interface_pattern, msg, re.IGNORECASE)
+        if iface_match:
+            interface_events.append({
+                "router": router,
+                "interface": iface_match.group(2).rstrip(','),
+                "state": iface_match.group(3).lower(),
+                "timestamp": timestamp
+            })
+            continue
+        
+        # OSPF adjacency change
+        ospf_match = re.search(ospf_pattern, msg, re.IGNORECASE)
+        if ospf_match:
+            from_state = ospf_match.group(3)
+            to_state = ospf_match.group(4)
+            ospf_events.append({
+                "router": router,
+                "neighbor": ospf_match.group(1),
+                "interface": ospf_match.group(2).rstrip(','),
+                "from_state": from_state,
+                "to_state": to_state,
+                "is_down": from_state.upper() == "FULL" and to_state.upper() != "FULL",
+                "timestamp": timestamp
+            })
+            continue
+        
+        # Config change
+        config_match = re.search(config_pattern, msg, re.IGNORECASE)
+        if config_match:
+            config_events.append({
+                "router": router,
+                "user": config_match.group(2),
+                "source_ip": config_match.group(3) if config_match.group(3) else "unknown",
+                "source": config_match.group(1),
+                "timestamp": timestamp
+            })
+    
+    # =========================================================================
+    # STEP 3: Generate Alerts with User Attribution
+    # =========================================================================
+    
+    # Aggregate user involvement across all routers for infrastructure events
+    user_infrastructure_involvement = {}  # {user: {bgp: [...], interface: [...], ospf: [...]}}
+    
+    # Process BGP events and correlate with users
+    for event in bgp_events:
+        correlated_users = find_correlated_users(event["router"], event["timestamp"], correlation_minutes=5)
+        for user_info in correlated_users:
+            user = user_info["user"]
+            if user not in user_infrastructure_involvement:
+                user_infrastructure_involvement[user] = {"bgp": [], "interface": [], "ospf": [], "config": [], "routers": set(), "source_ips": set()}
+            user_infrastructure_involvement[user]["bgp"].append(event)
+            user_infrastructure_involvement[user]["routers"].add(event["router"])
+            user_infrastructure_involvement[user]["source_ips"].add(user_info["source_ip"])
+    
+    # Process Interface events
+    for event in interface_events:
+        correlated_users = find_correlated_users(event["router"], event["timestamp"], correlation_minutes=5)
+        for user_info in correlated_users:
+            user = user_info["user"]
+            if user not in user_infrastructure_involvement:
+                user_infrastructure_involvement[user] = {"bgp": [], "interface": [], "ospf": [], "config": [], "routers": set(), "source_ips": set()}
+            user_infrastructure_involvement[user]["interface"].append(event)
+            user_infrastructure_involvement[user]["routers"].add(event["router"])
+            user_infrastructure_involvement[user]["source_ips"].add(user_info["source_ip"])
+    
+    # Process OSPF events
+    for event in ospf_events:
+        correlated_users = find_correlated_users(event["router"], event["timestamp"], correlation_minutes=5)
+        for user_info in correlated_users:
+            user = user_info["user"]
+            if user not in user_infrastructure_involvement:
+                user_infrastructure_involvement[user] = {"bgp": [], "interface": [], "ospf": [], "config": [], "routers": set(), "source_ips": set()}
+            user_infrastructure_involvement[user]["ospf"].append(event)
+            user_infrastructure_involvement[user]["routers"].add(event["router"])
+            user_infrastructure_involvement[user]["source_ips"].add(user_info["source_ip"])
+    
+    # Process Config events (direct attribution)
+    for event in config_events:
+        user = event["user"]
+        if user not in user_infrastructure_involvement:
+            user_infrastructure_involvement[user] = {"bgp": [], "interface": [], "ospf": [], "config": [], "routers": set(), "source_ips": set()}
+        user_infrastructure_involvement[user]["config"].append(event)
+        user_infrastructure_involvement[user]["routers"].add(event["router"])
+        if event["source_ip"] != "unknown":
+            user_infrastructure_involvement[user]["source_ips"].add(event["source_ip"])
+    
+    # =========================================================================
+    # STEP 4: Generate Per-User Alerts with Filtering & Ranking
+    # =========================================================================
+    # 
+    # FILTERING RULES:
+    # Rule 1 (Smoking Gun): Users with config changes are PRIMARY SUSPECTS
+    # Rule 2 (Frequency): Only show Top 5 users by correlation score
+    # 
+    # Correlation Score = config_count * 10 + bgp_count + iface_count + ospf_count
+    # (Config changes weighted 10x because "login + config" is much more suspicious than "login only")
+    # =========================================================================
+    
+    # Calculate correlation score for each user
+    user_scores = []
+    for user, involvement in user_infrastructure_involvement.items():
+        bgp_count = len(involvement["bgp"])
+        iface_count = len(involvement["interface"])
+        ospf_count = len(involvement["ospf"])
+        config_count = len(involvement["config"])
+        
+        # Smoking Gun Rule: Config changes weighted 10x
+        correlation_score = (config_count * 10) + bgp_count + iface_count + ospf_count
+        
+        # Determine suspect level
+        if config_count >= 3:
+            suspect_level = "PRIMARY_SUSPECT"
+        elif config_count >= 1:
+            suspect_level = "SECONDARY_SUSPECT"
+        else:
+            suspect_level = "INCIDENTAL"  # Login only, no config changes
+        
+        user_scores.append({
+            "user": user,
+            "involvement": involvement,
+            "correlation_score": correlation_score,
+            "suspect_level": suspect_level,
+            "bgp_count": bgp_count,
+            "iface_count": iface_count,
+            "ospf_count": ospf_count,
+            "config_count": config_count
+        })
+    
+    # Sort by correlation_score descending, then by config_count descending
+    user_scores.sort(key=lambda x: (x["correlation_score"], x["config_count"]), reverse=True)
+    
+    # Rule 2: Only keep Top 5 users
+    TOP_N_SUSPECTS = 5
+    top_suspects = user_scores[:TOP_N_SUSPECTS]
+    
+    # Generate alerts only for top suspects
+    for suspect in top_suspects:
+        user = suspect["user"]
+        involvement = suspect["involvement"]
+        bgp_count = suspect["bgp_count"]
+        iface_count = suspect["iface_count"]
+        ospf_count = suspect["ospf_count"]
+        config_count = suspect["config_count"]
+        correlation_score = suspect["correlation_score"]
+        suspect_level = suspect["suspect_level"]
+        
+        routers_list = list(involvement["routers"])
+        source_ips = list(involvement["source_ips"])
+        
+        total_infra_events = bgp_count + iface_count + ospf_count
+        
+        alert_types = []
+        event_details = []
+        
+        # BGP involvement
+        if bgp_count >= 3:
+            alert_types.append("bgp_flap_correlated")
+            event_details.append(f"{bgp_count} BGP neighbor down events")
+        
+        # Interface involvement
+        if iface_count >= 5:
+            alert_types.append("interface_flap_correlated")
+            event_details.append(f"{iface_count} interface state changes")
+        
+        # OSPF involvement
+        ospf_downs = sum(1 for e in involvement["ospf"] if e.get("is_down", False))
+        if ospf_count >= 3 or ospf_downs >= 2:
+            alert_types.append("ospf_storm_correlated")
+            event_details.append(f"{ospf_count} OSPF events ({ospf_downs} adjacency downs)")
+        
+        # Config tampering - primary indicator
+        if config_count >= 1:
+            alert_types.append("config_tampering")
+            event_details.append(f"{config_count} config changes")
+        
+        # Skip if no meaningful alert types (shouldn't happen for top suspects)
+        if not alert_types:
+            continue
+        
+        # Calculate score based on involvement level and suspect status
+        if suspect_level == "PRIMARY_SUSPECT":
+            base_score = 8.0  # Primary suspects start higher
+        elif suspect_level == "SECONDARY_SUSPECT":
+            base_score = 6.5
+        else:
+            base_score = 5.0
+        
+        # Boost score based on event counts
+        if correlation_score >= 80:
+            base_score = max(base_score, 9.0)
+        elif correlation_score >= 50:
+            base_score = max(base_score, 8.0)
+        elif correlation_score >= 30:
+            base_score = max(base_score, 7.0)
+        
+        if len(routers_list) >= 5:
+            base_score += 0.5  # Multi-router involvement
+        
+        score = min(9.5, base_score)
+        severity = "CRITICAL" if score >= 7.0 else "WARNING"
+        
+        # Add suspect level and correlation score to text
+        suspect_label = f"[{suspect_level}] " if suspect_level == "PRIMARY_SUSPECT" else ""
+        
+        ctx = {
+            "user": user,
+            "group": None,
+            "behavior": {
+                "type": "router_infrastructure_attack",
+                "bgp_events": bgp_count,
+                "interface_events": iface_count,
+                "ospf_events": ospf_count,
+                "config_events": config_count,
+                "correlation_score": correlation_score,
+                "suspect_level": suspect_level
+            },
+            "time": {"window_minutes": time_window_minutes},
+            "baseline": {"expected_events": 0},
+            "extras": {
+                "routers": routers_list,
+                "source_ips": source_ips,
+                "alert_types": alert_types
+            },
+        }
+        
+        alerts.append({
+            "type": ", ".join(alert_types),
+            "subject": user,
+            "severity": severity,
+            "score": float(score),
+            "text": f"{suspect_label}User {user} correlated with network infrastructure attacks: {'; '.join(event_details)}. "
+                    f"Correlation score: {correlation_score}. "
+                    f"Active on {len(routers_list)} router(s): {', '.join(routers_list[:5])}. "
+                    f"Source IPs: {', '.join(source_ips[:3])}. "
+                    f"User was logged in/configuring devices within 5 minutes of attack events.",
+            "evidence": {
+                "username": user,
+                "suspect_level": suspect_level,
+                "correlation_score": correlation_score,
+                "bgp_events": bgp_count,
+                "interface_events": iface_count,
+                "ospf_events": ospf_count,
+                "config_events": config_count,
+                "affected_routers": routers_list[:10],
+                "source_ips": source_ips[:5],
+                "correlation_window_minutes": 5
+            },
+            "prompt_ctx": ctx
+        })
+    
+    # =========================================================================
+    # STEP 5: Generate Infrastructure-Level Alerts (for events without user correlation)
+    # =========================================================================
+    
+    # Find routers with events that have NO correlated users
+    uncorrelated_bgp = [e for e in bgp_events if not find_correlated_users(e["router"], e["timestamp"], 5)]
+    uncorrelated_iface = [e for e in interface_events if not find_correlated_users(e["router"], e["timestamp"], 5)]
+    uncorrelated_ospf = [e for e in ospf_events if not find_correlated_users(e["router"], e["timestamp"], 5)]
+    
+    # BGP Flap Attack (uncorrelated)
+    if len(uncorrelated_bgp) >= 5:
+        rate_per_min = len(uncorrelated_bgp) / time_window_minutes
+        affected_routers = list(set(e["router"] for e in uncorrelated_bgp))
+        
+        if rate_per_min >= 1.0:
+            score = min(9.0, 6.5 + rate_per_min)
+            severity = "CRITICAL"
+        else:
+            score = min(6.0, 4.5 + rate_per_min)
+            severity = "WARNING"
+        
+        alerts.append({
+            "type": "bgp_flap_attack_unattributed",
+            "subject": f"{len(affected_routers)} routers",
+            "severity": severity,
+            "score": float(score),
+            "text": f"BGP Flap Attack detected (no user correlation found): {len(uncorrelated_bgp)} BGP neighbor down events "
+                    f"in {time_window_minutes:.0f} minutes ({rate_per_min:.2f}/min). "
+                    f"Affected routers: {', '.join(affected_routers[:5])}. "
+                    f"Could be external attack or network issue.",
+            "evidence": {
+                "total_bgp_downs": len(uncorrelated_bgp),
+                "rate_per_minute": float(rate_per_min),
+                "affected_routers": affected_routers[:10],
+                "user_attribution": "none"
+            },
+            "prompt_ctx": {"user": None, "group": None, "behavior": {"type": "bgp_flap_unattributed"}}
+        })
+    
+    # Interface Flap (uncorrelated)
+    if len(uncorrelated_iface) >= 10:
+        rate_per_min = len(uncorrelated_iface) / time_window_minutes
+        affected_routers = list(set(e["router"] for e in uncorrelated_iface))
+        
+        if rate_per_min >= 2.0:
+            score = min(8.0, 6.0 + rate_per_min * 0.5)
+            severity = "CRITICAL"
+        else:
+            score = min(5.5, 4.0 + rate_per_min * 0.5)
+            severity = "WARNING"
+        
+        alerts.append({
+            "type": "interface_flap_attack_unattributed",
+            "subject": f"{len(affected_routers)} routers",
+            "severity": severity,
+            "score": float(score),
+            "text": f"Interface Flap detected (no user correlation found): {len(uncorrelated_iface)} interface state changes "
+                    f"in {time_window_minutes:.0f} minutes. Could be physical layer issue or external attack.",
+            "evidence": {
+                "total_events": len(uncorrelated_iface),
+                "affected_routers": affected_routers[:10],
+                "user_attribution": "none"
+            },
+            "prompt_ctx": {"user": None, "group": None, "behavior": {"type": "interface_flap_unattributed"}}
+        })
+    
+    # OSPF Storm (uncorrelated)
+    if len(uncorrelated_ospf) >= 5:
+        ospf_downs = sum(1 for e in uncorrelated_ospf if e.get("is_down", False))
+        rate_per_min = len(uncorrelated_ospf) / time_window_minutes
+        affected_routers = list(set(e["router"] for e in uncorrelated_ospf))
+        
+        if rate_per_min >= 1.0 or ospf_downs >= 5:
+            score = min(8.0, 6.0 + rate_per_min * 0.5)
+            severity = "CRITICAL"
+        else:
+            score = min(5.5, 4.5 + rate_per_min)
+            severity = "WARNING"
+        
+        alerts.append({
+            "type": "ospf_storm_unattributed",
+            "subject": f"{len(affected_routers)} routers",
+            "severity": severity,
+            "score": float(score),
+            "text": f"OSPF Adjacency Storm detected (no user correlation found): {len(uncorrelated_ospf)} OSPF events "
+                    f"({ospf_downs} adjacency downs) in {time_window_minutes:.0f} minutes. "
+                    f"Could be routing attack or network instability.",
+            "evidence": {
+                "total_ospf_events": len(uncorrelated_ospf),
+                "adjacency_downs": ospf_downs,
+                "affected_routers": affected_routers[:10],
+                "user_attribution": "none"
+            },
+            "prompt_ctx": {"user": None, "group": None, "behavior": {"type": "ospf_storm_unattributed"}}
+        })
+    
+    return alerts
+
+
 def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = "generic") -> List[Dict[str, Any]]:
     """
     Step-2 generator: compare current window against stored baselines to produce human-readable alerts.
@@ -2970,6 +3503,10 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
     # ===== EDR/SYSMON-SPECIFIC DETECTIONS WITH CONTEXT-AWARE SCORING =====
     # EDR logs get context-aware detection (role + destination + behavioral analysis)
     alerts.extend(_detect_edr_anomalies(df, baselines_dir))
+
+    # ===== ROUTER/NETWORK INFRASTRUCTURE DETECTIONS =====
+    # Router logs get Cisco IOS pattern-based detection (BGP, OSPF, Interface, Config)
+    alerts.extend(_detect_router_anomalies(df))
 
     # ===== SECTION 0: ENHANCED DETECTION FOR MIXED LOGS =====
 

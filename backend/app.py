@@ -673,6 +673,31 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                 print(f"       → Gọi AI để phân tích tất cả {len(alerts_group)} alerts cùng lúc...")
                 ai_report, used_openai = analyze_alert_prompt(prompt)
                 
+                # === OPTION B: Post-process risk_level ===
+                # Only allow "Cực kỳ nguy cấp" if user has router correlation alerts
+                # (config_tampering, bgp_flap_correlated, interface_flap_correlated, ospf_storm_correlated)
+                HIGH_RISK_ALERT_PATTERNS = [
+                    "config_tampering",
+                    "_correlated",  # Matches bgp_flap_correlated, interface_flap_correlated, ospf_storm_correlated
+                    "PRIMARY_SUSPECT"
+                ]
+                
+                # Check if any alert type matches high-risk patterns
+                has_high_risk_alerts = False
+                for alert_type in alert_types:
+                    for pattern in HIGH_RISK_ALERT_PATTERNS:
+                        if pattern in alert_type:
+                            has_high_risk_alerts = True
+                            break
+                    if has_high_risk_alerts:
+                        break
+                
+                # If no high-risk alerts, cap risk_level at "Cao"
+                if not has_high_risk_alerts and ai_report.get("risk_level") == "Cực kỳ nguy cấp":
+                    ai_report["risk_level"] = "Cao"
+                    ai_report["risk_level_capped"] = True  # Flag for debugging
+                    print(f"       → Risk level capped from 'Cực kỳ nguy cấp' to 'Cao' (no router correlation)")
+                
                 # === BƯỚC 3d: Enrich TẤT CẢ alerts của user này với kết quả AI ===
                 # Tính toán stats từ logs (critical_count, warning_count, samples)
                 critical_count = sum(1 for log in logs_text if any(
@@ -683,13 +708,32 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                 ))
                 
                 # Add grouped result with all alerts
+                # Calculate raw values first - use proper severity ordering (not alphabetical max)
+                SEVERITY_ORDER = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
+                raw_severity_max = max(
+                    (a.get("severity", "INFO") for a in alerts_group),
+                    key=lambda s: SEVERITY_ORDER.get(s, 0)
+                ) if alerts_group else "INFO"
+                raw_score_max = max(a.get("score", 0) for a in alerts_group) if alerts_group else 0
+                
+                # === OPTION C: Cap Score and Severity for users without router correlation ===
+                # If no high-risk alerts, cap: Score <= 7.0, Severity = WARNING (not CRITICAL)
+                if not has_high_risk_alerts:
+                    severity_max = "WARNING" if raw_severity_max == "CRITICAL" else raw_severity_max
+                    score_max = min(raw_score_max, 7.0)
+                    if raw_severity_max == "CRITICAL" or raw_score_max > 7.0:
+                        print(f"       → [Option C] Score/Severity capped: {raw_score_max:.1f}→{score_max:.1f}, {raw_severity_max}→{severity_max}")
+                else:
+                    severity_max = raw_severity_max
+                    score_max = raw_score_max
+                
                 grouped_result = {
                     "subject": subject,
                     "alert_count": len(alerts_group),
                     "alert_types": alert_types,
                     "alerts": alerts_group,  # Include all individual alerts for reference
-                    "severity_max": max(a.get("severity") for a in alerts_group) if alerts_group else "INFO",
-                    "score_max": max(a.get("score", 0) for a in alerts_group) if alerts_group else 0,
+                    "severity_max": severity_max,
+                    "score_max": score_max,
                     "related_logs_count": len(logs_text),
                     "enriched": {
                         "critical_count": critical_count,
@@ -699,7 +743,7 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                     "ai_analysis": ai_report,
                 }
                 step3_results.append(grouped_result)
-                print(f"      [OK] Hoàn thành - Phân tích {len(alerts_group)} alerts cho '{subject}', risk_level: {ai_report.get('risk_level')}")
+                print(f"      [OK] Hoàn thành - Phân tích {len(alerts_group)} alerts cho '{subject}', risk_level: {ai_report.get('risk_level')}, score: {score_max:.1f}, severity: {severity_max}")
                 
             except Exception as ae:
                 print(f"      [ERROR] Lỗi phân tích '{subject}': {ae}")
@@ -732,13 +776,17 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
         flattened_results = []
         for grouped_item in step3_results:
             ai_analysis = grouped_item.get("ai_analysis", {})
-            # Enrich each individual alert with group's AI analysis
+            # Use capped score_max and severity_max from grouped_item (Option C)
+            capped_score = grouped_item.get("score_max", 0)
+            capped_severity = grouped_item.get("severity_max", "INFO")
+            
+            # Enrich each individual alert with group's capped score/severity and AI analysis
             for alert in grouped_item.get("alerts", []):
                 flattened_results.append({
                     "type": alert.get("type"),
                     "subject": alert.get("subject"),
-                    "severity": alert.get("severity"),  # ← Alert's own severity
-                    "score": alert.get("score"),        # ← Alert's own score
+                    "severity": capped_severity,  # Use capped severity from Option C
+                    "score": capped_score,        # Use capped score from Option C
                     "text": alert.get("text"),
                     "evidence": alert.get("evidence"),
                     "ai_analysis": ai_analysis,  # Share group's AI analysis
