@@ -1296,7 +1296,7 @@ def _parse_dns(lines, assume_year=None):
 def _parse_keyvalue(lines):
     rows = []
     for ln in lines:
-        row = {"message": ln}
+        row = {"message": ln, "raw_line": ln}  # Keep raw_line for Sysmon field extraction
         for k, v in _KV_TOKEN_RE.findall(ln):
             if v.startswith('"') and v.endswith('"'):
                 v = v[1:-1]
@@ -2611,7 +2611,14 @@ def _parse_winevent_structured(lines):
             continue
         
         ts_str = f"{m['date']} {m['time']}"
-        ts = pd.to_datetime(ts_str, utc=True, errors="coerce")
+        # Windows Event Log timestamps are typically in LOCAL time (Asia/Ho_Chi_Minh)
+        # First parse as naive datetime, then localize to local timezone and convert to UTC
+        try:
+            ts = pd.to_datetime(ts_str, errors="coerce")
+            if pd.notna(ts):
+                ts = ts.tz_localize("Asia/Ho_Chi_Minh").tz_convert("UTC")
+        except Exception:
+            ts = pd.to_datetime(ts_str, utc=True, errors="coerce")
         
         # Parse key=value fields from the line
         event_id = None
@@ -2688,6 +2695,26 @@ def _parse_winevent_structured(lines):
             action = "event"
             status = level.lower() if level else "info"
         
+        # Extract Sysmon-specific fields for attack detection
+        target_image = None
+        source_image = None
+        granted_access = None
+        new_process_name = None
+        command_line = None
+        
+        for kv in re.findall(r'(\w+)="([^"]*)"', ln):  # Re-scan for quoted values
+            key, val = kv
+            if key == 'TargetImage':
+                target_image = val
+            elif key == 'SourceImage':
+                source_image = val
+            elif key == 'GrantedAccess':
+                granted_access = val
+            elif key == 'NewProcessName':
+                new_process_name = val
+            elif key == 'CommandLine':
+                command_line = val
+        
         rows.append({
             "timestamp": ts,
             "host": host,
@@ -2700,7 +2727,13 @@ def _parse_winevent_structured(lines):
             "action": action,
             "status": status,
             "message": message or ln,
-            "program": channel or "winevent"
+            "program": channel or "winevent",
+            "raw_line": ln,  # Keep full log for field extraction
+            "target_image": target_image,
+            "source_image": source_image,
+            "granted_access": granted_access,
+            "new_process_name": new_process_name,
+            "command_line": command_line
         })
     
     return pd.DataFrame(rows)
@@ -2715,7 +2748,14 @@ def _parse_winevent_log(lines):
             continue
 
         ts_str = f"{m['date']} {m['time']}"
-        ts = pd.to_datetime(ts_str, utc=True, errors="coerce")
+        # Windows Event Log timestamps are typically in LOCAL time (Asia/Ho_Chi_Minh)
+        # First parse as naive datetime, then localize to local timezone and convert to UTC
+        try:
+            ts = pd.to_datetime(ts_str, errors="coerce")
+            if pd.notna(ts):
+                ts = ts.tz_localize("Asia/Ho_Chi_Minh").tz_convert("UTC")
+        except Exception:
+            ts = pd.to_datetime(ts_str, utc=True, errors="coerce")
 
         msg = m["message"]
         
@@ -2785,6 +2825,26 @@ def _parse_winevent_log(lines):
             action = "event"
             status = "info"
 
+        # Extract Sysmon-specific fields for attack detection
+        target_image = None
+        source_image = None
+        granted_access = None
+        new_process_name = None
+        command_line = None
+        
+        for kv in re.findall(r'(\w+)="([^"]*)"', msg):  # Scan for quoted values
+            key, val = kv
+            if key == 'TargetImage':
+                target_image = val
+            elif key == 'SourceImage':
+                source_image = val
+            elif key == 'GrantedAccess':
+                granted_access = val
+            elif key == 'NewProcessName':
+                new_process_name = val
+            elif key == 'CommandLine':
+                command_line = val
+
         rows.append({
             "timestamp": ts,
             "host": device,  # Use device as host for consistency
@@ -2796,7 +2856,13 @@ def _parse_winevent_log(lines):
             "device": device,
             "action": action,
             "status": status,
-            "message": msg
+            "message": msg,
+            "raw_line": ln,  # Keep full log for field extraction
+            "target_image": target_image,
+            "source_image": source_image,
+            "granted_access": granted_access,
+            "new_process_name": new_process_name,
+            "command_line": command_line
         })
     return pd.DataFrame(rows)
 
