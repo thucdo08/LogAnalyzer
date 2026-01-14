@@ -396,12 +396,20 @@ def reduce_noise(df: pd.DataFrame, threshold: int = 5, window: str = "1min") -> 
     # Đừng collapse các sự kiện bảo mật quan trọng
     try:
         status_lower = df.get("status").astype(str).str.lower() if "status" in df.columns else None
-        critical_status = status_lower.isin(["failed", "failure", "blocked", "alert"]) if status_lower is not None else None
+        # CRITICAL: Preserve all security events - DENY/blocked firewall, failed logins, alerts
+        critical_status = status_lower.isin(["failed", "failure", "blocked", "denied", "deny", "drop", "alert"]) if status_lower is not None else None
+        
+        # Also check 'action' column for firewall DENY events
+        action_upper = df.get("action").astype(str).str.upper() if "action" in df.columns else None
+        critical_action = action_upper.isin(["DENY", "DENIED", "BLOCK", "BLOCKED", "DROP"]) if action_upper is not None else None
+        
         program_lower = df.get("program").astype(str).str.lower() if "program" in df.columns else None
         critical_programs = {"suricata", "modsecurity", "vpcflow", "netflow", "sysmon", "configd", "named", "zeek_dns"}
         is_critical_prog = program_lower.apply(lambda p: p in critical_programs) if program_lower is not None else None
         if critical_status is not None:
             df.loc[critical_status.fillna(False), "noise_key"] = None
+        if critical_action is not None:
+            df.loc[critical_action.fillna(False), "noise_key"] = None
         if is_critical_prog is not None:
             df.loc[is_critical_prog.fillna(False), "noise_key"] = None
     except Exception:
