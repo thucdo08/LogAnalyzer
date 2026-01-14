@@ -629,40 +629,43 @@ def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
     
     try:
         # ===== DETECTION 1: DENY/BLOCK BURST =====
-        # High volume of blocked connections indicates DoS attempt or scanning
+        # Rapid series of connection denials/blocks (3 strategies)
         # Check BOTH status AND action columns for blocked/denied patterns
-        blocked_df = pd.DataFrame()
         
-        if "status" in df.columns:
-            status_blocked = df[df["status"].astype(str).str.lower().isin(["blocked", "denied", "drop", "deny"])].copy()
-            blocked_df = pd.concat([blocked_df, status_blocked], ignore_index=True)
+        # Track detected events to avoid duplicates
+        detected_deny_bursts = set()  # Track (source_ip, dest_ip) or target_host to deduplicate
         
-        if "action" in df.columns:
-            action_blocked = df[df["action"].astype(str).str.upper().isin(["DENY", "BLOCK", "DROP", "BLOCKED", "DENIED"])].copy()
-            blocked_df = pd.concat([blocked_df, action_blocked], ignore_index=True)
-        
-        # Remove duplicates if any
-        if not blocked_df.empty and "source_ip" in blocked_df.columns:
-            blocked_df = blocked_df.drop_duplicates()
+        if "dest_port" in df.columns and "source_ip" in df.columns:
+            blocked_df = pd.DataFrame()
             
-            if len(blocked_df) >= 10:  # Minimum threshold
-                # Group by source IP
+            if "status" in df.columns:
+                status_blocked = df[df["status"].astype(str).str.lower().isin(["blocked", "denied", "drop", "deny"])].copy()
+                blocked_df = pd.concat([blocked_df, status_blocked], ignore_index=True)
+            
+            if "action" in df.columns:
+                action_blocked = df[df["action"].astype(str).str.upper().isin(["DENY", "BLOCK", "DROP", "BLOCKED", "DENIED"])].copy()
+                blocked_df = pd.concat([blocked_df, action_blocked], ignore_index=True)
+            
+            if not blocked_df.empty:
+                blocked_df = blocked_df.drop_duplicates()
+            
+            # === STRATEGY 1: Per-IP Detection (Primary) ===
+            # High DENY count from single source IP
+            if not blocked_df.empty:
                 for src_ip, group in blocked_df.groupby("source_ip"):
                     blocked_count = len(group)
                     
-                    if blocked_count >= 20:  # High threshold for burst
-                        # Get unique destinations
+                    if blocked_count >= 5:  # REDUCED from 20 to 5 for better detection
                         dest_ips = group["dest_ip"].dropna().unique() if "dest_ip" in group.columns else []
-                        
-                        # Resolve IP to username
                         username = get_user_from_ip(src_ip)
-                        
-                        # Use unified scoring
                         score_data = scoring.get_alert_metadata("firewall_deny_burst", [])
+                        
+                        # Mark as detected
+                        detected_deny_bursts.add(f"per_ip:{src_ip}")
                         
                         alerts.append({
                             "type": "firewall_deny_burst",
-                            "subject": username,  # Real user, not "Firewall Security"
+                            "subject": username,
                             "severity": score_data["severity"],
                             "score": score_data["score"],
                             "text": f"Firewall DENY/BLOCK burst detected: {blocked_count} blocked connections from {username} (IP: {src_ip}) to {len(dest_ips)} destination(s).",
@@ -672,16 +675,135 @@ def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                                 "blocked_count": int(blocked_count),
                                 "destinations": [str(d) for d in dest_ips[:10]],
                                 "dest_count": int(len(dest_ips)),
+                                "detection_method": "per_ip",
                             },
                             "prompt_ctx": {
                                 "user": username,
                                 "group": None,
                                 "behavior": {"type": "deny_burst", "count": blocked_count},
                                 "time": None,
-                                "baseline": {"expected_denies": 5},
+                                "baseline": {"expected_denies": 2},
                                 "extras": {"reason": "High volume of blocked connections may indicate DoS or scanning"},
                             },
                         })
+            
+            # === STRATEGY 2: Time Window Detection (Secondary - skip if per_ip already detected) ===
+            # Detect burst: >10 DENY events in any 1-minute window
+            if "timestamp" in blocked_df.columns and len(blocked_df) >= 10:
+                try:
+                    # Ensure timestamp is datetime
+                    blocked_df_time = blocked_df.copy()
+                    blocked_df_time["timestamp"] = pd.to_datetime(blocked_df_time["timestamp"], errors="coerce", utc=True)
+                    blocked_df_time = blocked_df_time.dropna(subset=["timestamp"])
+                    
+                    if not blocked_df_time.empty:
+                        # Count DENY events per minute
+                        blocked_df_time = blocked_df_time.set_index("timestamp").sort_index()
+                        deny_per_minute = blocked_df_time.resample("1min").size()
+                        
+                        # Check for bursts: >10 denies/minute
+                        burst_minutes = deny_per_minute[deny_per_minute >= 10]
+                        
+                        if len(burst_minutes) > 0:
+                            max_rate = int(deny_per_minute.max())
+                            total_in_burst = int(burst_minutes.sum())
+                            
+                            # Get all IPs involved in the burst
+                            burst_ips = blocked_df_time[
+                                blocked_df_time.index.to_series().dt.floor("1min").isin(burst_minutes.index)
+                            ]["source_ip"].dropna().unique()
+                            
+                            # Check if any of these IPs were already detected by per_ip strategy
+                            already_detected = any(f"per_ip:{ip}" in detected_deny_bursts for ip in burst_ips)
+                            
+                            if not already_detected:
+                                # Get all targets
+                                burst_targets = blocked_df_time[
+                                    blocked_df_time.index.to_series().dt.floor("1min").isin(burst_minutes.index)
+                                ]["dest_ip"].dropna().unique()
+                                
+                                score_data = scoring.get_alert_metadata("firewall_deny_burst", [])
+                                
+                                # Mark as detected
+                                detected_deny_bursts.add(f"time_window:{','.join(str(ip) for ip in burst_ips[:3])}")
+                                
+                                alerts.append({
+                                    "type": "firewall_deny_burst",
+                                    "subject": f"Multiple Users ({len(burst_ips)})",
+                                    "severity": score_data["severity"],
+                                    "score": score_data["score"],
+                                    "text": f"DENY burst attack detected: {total_in_burst} blocked connections ({max_rate} per minute peak) from {len(burst_ips)} source(s) to {len(burst_targets)} target(s).",
+                                    "evidence": {
+                                        "total_denied": total_in_burst,
+                                        "max_rate_per_minute": max_rate,
+                                        "source_count": int(len(burst_ips)),
+                                        "source_ips": [str(ip) for ip in burst_ips[:10]],
+                                        "target_count": int(len(burst_targets)),
+                                        "targets": [str(ip) for ip in burst_targets[:5]],
+                                        "detection_method": "time_window",
+                                    },
+                                    "prompt_ctx": {
+                                        "user": None,
+                                        "group": None,
+                                        "behavior": {"type": "deny_burst_temporal", "rate": max_rate, "total": total_in_burst},
+                                        "time": None,
+                                        "baseline": {"expected_denies_per_minute": 2},
+                                        "extras": {"reason": "Rapid burst of DENY events indicates active attack"},
+                                    },
+                                })
+                except Exception:
+                    pass  # Skip time window detection if error
+            
+            # === STRATEGY 3: Pattern Detection - Distributed attack (Secondary - skip if already detected) ===
+            # Multiple source IPs targeting same destination
+            if "dest_ip" in blocked_df.columns and "dst_host" in blocked_df.columns:
+                try:
+                    for dest, group in blocked_df.groupby("dest_ip"):
+                        unique_sources = group["source_ip"].dropna().unique()
+                        
+                        # Threshold: 5+ different source IPs attacking same target
+                        if len(unique_sources) >= 5:
+                            dest_host = group["dst_host"].iloc[0] if "dst_host" in group.columns else dest
+                            total_attempts = len(group)
+                            dest_ports = group["dest_port"].dropna().unique() if "dest_port" in group.columns else []
+                            
+                            # Check if this target or any sources already detected
+                            target_key = f"target:{dest_host}"
+                            already_detected_sources = any(f"per_ip:{ip}" in detected_deny_bursts for ip in unique_sources)
+                            already_detected_target = target_key in detected_deny_bursts
+                            
+                            if not already_detected_sources and not already_detected_target:
+                                score_data = scoring.get_alert_metadata("firewall_deny_burst", [])
+                                
+                                # Mark as detected
+                                detected_deny_bursts.add(target_key)
+                                
+                                alerts.append({
+                                    "type": "firewall_deny_burst",
+                                    "subject": f"Target: {dest_host}",
+                                    "severity": score_data["severity"],
+                                    "score": score_data["score"],
+                                    "text": f"Distributed DENY attack: {total_attempts} blocked connections from {len(unique_sources)} different source(s) targeting {dest_host}:{dest_ports[0] if len(dest_ports) > 0 else 'unknown'}.",
+                                    "evidence": {
+                                        "target_ip": str(dest),
+                                        "target_host": str(dest_host),
+                                        "target_ports": [int(p) for p in dest_ports if pd.notna(p)][:5],
+                                        "total_attempts": int(total_attempts),
+                                        "source_count": int(len(unique_sources)),
+                                        "source_ips": [str(ip) for ip in unique_sources[:10]],
+                                        "detection_method": "pattern_distributed",
+                                    },
+                                    "prompt_ctx": {
+                                        "user": None,
+                                        "group": None,
+                                        "behavior": {"type": "distributed_deny_attack", "sources": len(unique_sources), "attempts": total_attempts},
+                                        "time": None,
+                                        "baseline": {"expected_sources_per_target": 2},
+                                        "extras": {"reason": "Multiple sources attacking same target indicates coordinated attack"},
+                                    },
+                                })
+                except Exception:
+                    pass  # Skip pattern detection if error
         
         # ===== DETECTION 2: DATA EXFILTRATION =====
         # Large outbound data transfers
@@ -852,6 +974,163 @@ def _detect_firewall_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                                 },
                             })
     
+    except Exception as e:
+        # Silently skip on error
+        pass
+    
+    # ===== DETECTION 5: DATA EXFILTRATION =====
+    # Detect abnormally large data transfers to external IPs
+    try:
+        # Helper function to detect external (non-RFC1918) IPs
+        def is_external_ip(ip_str):
+            """Check if IP is external (not RFC1918 private IP)."""
+            if not ip_str or pd.isna(ip_str):
+                return False
+            try:
+                ip_str = str(ip_str).strip()
+                parts = ip_str.split('.')
+                if len(parts) != 4:
+                    return False
+                octets = [int(p) for p in parts]
+                
+                # RFC1918 private ranges
+                if octets[0] == 10:
+                    return False
+                if octets[0] == 172 and 16 <= octets[1] <= 31:
+                    return False
+                if octets[0] == 192 and octets[1] == 168:
+                    return False
+                if octets[0] == 127:  # Loopback
+                    return False
+                
+                return True
+            except Exception:
+                return False
+        
+        # Filter to ALLOW actions with bytes_sent field and external destinations
+        if "action" in df.columns and ("bytes_sent" in df.columns or "bytes" in df.columns):
+            allowed_df_exfil = df[df["action"].astype(str).str.upper().isin(["ALLOW", "ALLOWED", "ACCEPT", "PASS"])].copy()
+            
+            if not allowed_df_exfil.empty:
+                # Use bytes_sent or bytes column
+                bytes_col = "bytes_sent" if "bytes_sent" in allowed_df_exfil.columns else "bytes"
+                
+                if bytes_col in allowed_df_exfil.columns:
+                    # Convert bytes to numeric
+                    allowed_df_exfil["bytes_num"] = pd.to_numeric(allowed_df_exfil[bytes_col], errors="coerce")
+                    
+                    # Filter to external destinations only
+                    if "dest_ip" in allowed_df_exfil.columns:
+                        allowed_df_exfil["is_external"] = allowed_df_exfil["dest_ip"].apply(is_external_ip)
+                        external_df = allowed_df_exfil[allowed_df_exfil["is_external"] == True].copy()
+                        
+                        if not external_df.empty and "bytes_num" in external_df.columns:
+                            # Strategy 1: Absolute threshold - single connection >10 MB
+                            EXFIL_BYTE_THRESHOLD = 10 * 1024 * 1024  # 10 MB
+                            large_transfers = external_df[external_df["bytes_num"] > EXFIL_BYTE_THRESHOLD]
+                            
+                            for _, row in large_transfers.iterrows():
+                                bytes_val = row["bytes_num"]
+                                src_ip = row.get("source_ip", "unknown")
+                                dest_ip = row.get("dest_ip", "unknown")
+                                dest_host = row.get("dst_host", dest_ip)
+                                username = get_user_from_ip(src_ip)
+                                
+                                bytes_mb = bytes_val / (1024 * 1024)
+                                
+                                # Use unified scoring
+                                score_data = scoring.get_alert_metadata("firewall_exfiltration", [])
+                                
+                                alerts.append({
+                                    "type": "firewall_exfiltration",
+                                    "subject": username,
+                                    "severity": score_data["severity"],
+                                    "score": score_data["score"],
+                                    "text": f"Data exfiltration detected: {username} transferred {bytes_mb:.1f} MB to external IP {dest_host}.",
+                                    "evidence": {
+                                        "username": username,
+                                        "source_ip": str(src_ip),
+                                        "dest_ip": str(dest_ip),
+                                        "dest_host": str(dest_host),
+                                        "bytes_transferred": int(bytes_val),
+                                        "bytes_mb": round(bytes_mb, 2),
+                                        "threshold_mb": 10.0,
+                                        "detection_method": "bytes_threshold",
+                                    },
+                                    "prompt_ctx": {
+                                        "user": username,
+                                        "group": None,
+                                        "behavior": {
+                                            "type": "data_exfiltration",
+                                            "bytes": int(bytes_val),
+                                            "destination": str(dest_host),
+                                        },
+                                        "time": None,
+                                        "baseline": {"normal_bytes": 1200000},  # ~1.2 MB baseline
+                                        "extras": {"reason": "Abnormally large data transfer to external IP may indicate exfiltration"},
+                                    },
+                                })
+                            
+                            # Strategy 2: Statistical anomaly - group by user and detect outliers
+                            if "source_ip" in external_df.columns:
+                                for src_ip, group in external_df.groupby("source_ip"):
+                                    valid_bytes = group["bytes_num"].dropna()
+                                    
+                                    if len(valid_bytes) >= 3:  # Need at least 3 samples
+                                        mean_bytes = valid_bytes.mean()
+                                        std_bytes = valid_bytes.std()
+                                        
+                                        if std_bytes > 0 and mean_bytes > 0:
+                                            # Find outliers: >5x mean or Z-score >3
+                                            threshold_mult = max(mean_bytes * 5, 5 * 1024 * 1024)  # At least 5MB
+                                            outliers = valid_bytes[valid_bytes > threshold_mult]
+                                            
+                                            if len(outliers) > 0:
+                                                username = get_user_from_ip(src_ip)
+                                                max_transfer = outliers.max()
+                                                max_mb = max_transfer / (1024 * 1024)
+                                                mean_mb = mean_bytes / (1024 * 1024)
+                                                z_score = (max_transfer - mean_bytes) / std_bytes if std_bytes > 0 else 0
+                                                
+                                                # Only alert if significantly anomalous
+                                                if z_score >= 3 or max_transfer > threshold_mult:
+                                                    # Find the row with max transfer
+                                                    max_row = group[group["bytes_num"] == max_transfer].iloc[0]
+                                                    dest_ip = max_row.get("dest_ip", "unknown")
+                                                    dest_host = max_row.get("dst_host", dest_ip)
+                                                    
+                                                    score_data = scoring.get_alert_metadata("firewall_exfiltration", [])
+                                                    
+                                                    alerts.append({
+                                                        "type": "firewall_exfiltration",
+                                                        "subject": username,
+                                                        "severity": score_data["severity"],
+                                                        "score": score_data["score"],
+                                                        "text": f"Statistical data exfiltration anomaly: {username} transferred {max_mb:.1f} MB to {dest_host} (baseline: {mean_mb:.1f} MB, Z-score: {z_score:.1f}).",
+                                                        "evidence": {
+                                                            "username": username,
+                                                            "source_ip": str(src_ip),
+                                                            "dest_ip": str(dest_ip),
+                                                            "dest_host": str(dest_host),
+                                                            "bytes_transferred": int(max_transfer),
+                                                            "bytes_mb": round(max_mb, 2),
+                                                            "baseline_mb": round(mean_mb, 2),
+                                                            "z_score": round(z_score, 2),
+                                                            "detection_method": "statistical_anomaly",
+                                                        },
+                                                        "prompt_ctx": {
+                                                            "user": username,
+                                                            "group": None,
+                                                            "behavior": {
+                                                                "type": "data_exfiltration_statistical",
+                                                                "bytes": int(max_transfer),
+                                                                "baseline_bytes": int(mean_bytes),
+                                                            },
+                                                            "time": None,
+                                                            "baseline": {"normal_bytes": int(mean_bytes)},
+                                                            "extras": {"reason": "Data transfer significantly exceeds user baseline"},
+                                                        },
+                                                    })
     except Exception as e:
         # Silently skip on error
         pass
