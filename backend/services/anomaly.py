@@ -3923,6 +3923,111 @@ def _detect_edr_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = 
         # Infer role
         user_role, role_config = get_user_role(username)
         
+        # ===== PATTERN CLASSIFICATION: Detect specific attack type =====
+        
+        # Get this user's actual connections for detailed analysis
+        user_connections = df_edr[df_edr["username"] == username].copy()
+        
+        def classify_network_pattern(user_df, destinations, dest_ports, unique_src_ips, user_role):
+            """
+            Classify network anomaly into specific attack pattern.
+            Priority order: LOLBins > Port Scan > RDP Brute Force > Lateral Movement > Data Exfiltration > Network Spike
+            """
+            # Known Living Off The Land Binaries
+            LOLBINS = {"powershell.exe", "cmd.exe", "wmic.exe", "certutil.exe", 
+                       "bitsadmin.exe", "rundll32.exe", "regsvr32.exe", "mshta.exe",
+                       "msiexec.exe", "regasm.exe", "installutil.exe", "cscript.exe", "wscript.exe"}
+            
+            # Calculate metrics
+            external_ips = [ip for ip in destinations if is_external_ip(ip)]
+            external_ip_count = len(set(external_ips))
+            unique_dest_ips = len(set(destinations))
+            unique_ports = len(set(dest_ports))
+            
+            
+            # Priority 1: LOLBins Outbound
+            # Check if user executed LOLBins processes making external connections
+            if external_ip_count > 0:
+                # Check all processes (images) executed by this user
+                lolbins_detected = set()
+                for _, conn in user_df.iterrows():
+                    image = str(conn.get("image", "")).lower()
+                    # Extract just the filename from full path
+                    if "\\" in image:
+                        image = image.split("\\")[-1]
+                    
+                    # Check if it's a LOLBin
+                    for lolbin in LOLBINS:
+                        if lolbin.lower() in image:
+                            lolbins_detected.add(lolbin)
+                            break
+                
+                # If LOLBins found with external connections, flag it
+                if len(lolbins_detected) > 0:
+                    return "edr_lolbins_outbound_detected", "lolbins_outbound"
+            
+            # Priority 2: Port Scanning
+            # Scanning 10+ different ports indicates reconnaissance behavior
+            if unique_ports >= 10 and unique_dest_ips > 0:
+                return "edr_port_scan_detected", "port_scan"
+            
+            # Priority 3: RDP Brute Force
+            rdp_connections = sum(1 for p in dest_ports if p == 3389)
+            if rdp_connections >= 30 and unique_src_ips >= 10:
+                if user_role not in ["admin", "netops"]:
+                    return "edr_rdp_bruteforce_detected", "rdp_bruteforce"
+            
+            # Priority 4: Lateral Movement 
+            #Check connections to internal infrastructure servers on admin ports
+            admin_ports = {22, 23, 3389, 445, 1433, 3306, 5432}
+            internal_servers_accessed = set()
+            
+            for _, conn in user_df.iterrows():
+                dest_ip = conn.get("destination_ip")
+                dest_port = conn.get("destination_port")
+                if pd.notna(dest_ip) and pd.notna(dest_port):
+                    if dest_ip in INTERNAL_INFRASTRUCTURE and int(dest_port) in admin_ports:
+                        internal_servers_accessed.add(dest_ip)
+            
+            # Lateral movement: >=2 internal servers accessed on admin ports
+            if len(internal_servers_accessed) >= 2:
+                if user_role not in ["admin", "netops"]:
+                    return "edr_lateral_movement_detected", "lateral_movement"
+            
+            # Priority 5: C2 Beacon Detection
+            # C2 beacons repeatedly connect to same external IP on suspicious ports
+            C2_PORTS = {443, 8080, 4444, 8443, 1337, 6666, 9999, 53, 80}
+            c2_connections = {}  # external_ip -> count
+            for _, conn in user_df.iterrows():
+                dest_ip = str(conn.get("destination_ip", ""))
+                dest_port = conn.get("destination_port", 0)
+                try:
+                    dest_port = int(dest_port)
+                except:
+                    dest_port = 0
+                
+                # Check for external IP on C2 common ports
+                if dest_ip and is_external_ip(dest_ip) and dest_port in C2_PORTS:
+                    c2_connections[dest_ip] = c2_connections.get(dest_ip, 0) + 1
+            
+            # If any external IP has >= 10 connections on C2 ports = beaconing
+            for ext_ip, conn_count in c2_connections.items():
+                if conn_count >= 10:
+                    return "edr_c2_beacon_detected", "c2_beacon"
+            
+            # Priority 6: Data Exfiltration
+            if external_ip_count >= 15 and unique_dest_ips > 0:
+                external_ip_ratio = external_ip_count / unique_dest_ips
+                if external_ip_ratio > 0.6:
+                    return "edr_data_exfiltration_detected", "data_exfiltration"
+            
+            # Fallback: Network Spike
+            return "edr_network_spike", "network_spike"
+        
+        # Classify the pattern
+        alert_type, attack_pattern = classify_network_pattern(user_connections, destinations, dest_ports, unique_src_ips, user_role)
+        
+        
         # ===== MODULE C: SCORING (Absolute + Percentage) =====
         
         # Base score (absolute count)
@@ -4007,6 +4112,7 @@ def _detect_edr_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = 
         evidence = {
             "username": username,
             "user_role": user_role,
+            "attack_pattern": attack_pattern,  # NEW: Add attack pattern classification
             "unique_src_ips": unique_src_ips,
             "baseline_ips": baseline_ips,
             "destinations_count": len(destinations),
@@ -4018,7 +4124,7 @@ def _detect_edr_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str = 
         
         # Create alert
         alerts.append({
-            "type": "edr_suspicious_network_activity",
+            "type": alert_type,  # Use classified alert type instead of hardcoded
             "subject": username,
             "severity": severity,
             "score": final_score,

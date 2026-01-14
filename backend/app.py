@@ -745,6 +745,14 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                     "firewall_deny_burst",  # DENY burst attacks (DoS, coordinated attacks)
                     "firewall_port_scan",  # Port scanning attempts
                     "firewall_exfiltration",    # Data exfiltration via firewall (CRITICAL FIX)
+                    # EDR attacks - Tier 1 priority (CRITICAL FIX for data exfiltration)
+                "edr_suspicious_network_activity",  # EDR network anomalies with high score (backward compatibility)
+                "edr_data_exfiltration_detected",   # NEW: Data exfiltration pattern
+                "edr_lateral_movement_detected",    # NEW: Lateral movement pattern
+                "edr_port_scan_detected",           # NEW: Port scanning pattern
+                "edr_rdp_bruteforce_detected",      # NEW: RDP brute force pattern
+                "edr_lolbins_outbound_detected",    # NEW: LOLBins outbound connections
+                "edr_network_spike",                # NEW: Generic network spike (fallback)
                 ]
                 has_high_confidence_attack = any(
                     a.get("type") in HIGH_CONFIDENCE_ATTACK_TYPES
