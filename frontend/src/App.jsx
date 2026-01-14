@@ -628,7 +628,19 @@ export default function App() {
                           <div key={`${subject.subject}-${idx}`} className="bg-white p-3 rounded border-l-4 border-indigo-400">
                             <div className="flex items-start justify-between mb-2">
                               <div>
-                                <div className="font-semibold text-slate-800">{subject.subject}</div>
+                                <div className="font-semibold text-slate-800 flex items-center gap-2">
+                                  {(subject.subject || "").toLowerCase() === "unknown" ? (
+                                    <>
+                                      <span className="text-2xl">🚨</span>
+                                      <span className="text-red-700">{subject.subject}</span>
+                                      <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-bold  rounded uppercase border border-red-300">
+                                        ⚠️ ROGUE DEVICE
+                                      </span>
+                                    </>
+                                  ) : (
+                                    subject.subject
+                                  )}
+                                </div>
                                 <div className="text-xs text-slate-600">
                                   {alertTypesLabel} | {subject.alert_count} alerts
                                 </div>
