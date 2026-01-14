@@ -1,0 +1,217 @@
+{
+  "finance": {
+    "users": [
+      "anhthu",
+      "linhfin",
+      "ngocmai",
+      "thuongf",
+      "trinhk"
+    ],
+    "source_ips": [
+      "10.103.117.155",
+      "10.103.170.222",
+      "10.127.63.250",
+      "10.189.173.182",
+      "10.230.65.53",
+      "10.30.185.148"
+    ],
+    "hosts": [
+      "db-fin01",
+      "erpsrv01",
+      "filesrv-fin01"
+    ]
+  },
+  "itadmin": {
+    "users": [
+      "admin1",
+      "admin2",
+      "backup",
+      "itops",
+      "netops",
+      "svc_monitor"
+    ],
+    "source_ips": [
+      "10.102.112.36",
+      "10.102.252.24",
+      "10.152.112.176",
+      "10.152.16.207",
+      "10.28.125.42",
+      "10.51.107.172",
+      "10.51.136.180"
+    ],
+    "hosts": [
+      "authsrv01",
+      "backupsrv01",
+      "fw-mgmt01"
+    ]
+  },
+  "sales": {
+    "users": [
+      "lehong",
+      "phamtt",
+      "sales1",
+      "sales2",
+      "tranbinh"
+    ],
+    "source_ips": [
+      "10.132.165.28",
+      "10.151.5.175",
+      "10.16.103.103",
+      "10.165.37.159",
+      "10.167.203.240",
+      "10.170.101.40",
+      "10.170.82.139",
+      "10.188.122.15",
+      "10.19.106.63",
+      "10.223.186.215",
+      "10.38.78.161",
+      "10.38.81.203",
+      "10.56.37.27",
+      "10.73.79.66",
+      "10.77.91.130",
+      "10.88.218.159",
+      "10.88.232.158",
+      "10.99.30.219"
+    ],
+    "hosts": [
+      "crm-sf01",
+      "sharepoint01",
+      "websrv01"
+    ]
+  },
+  "engineering": {
+    "users": [
+      "huydev",
+      "huyle",
+      "khanhng",
+      "minhtq",
+      "quangdev",
+      "tnghia"
+    ],
+    "source_ips": [
+      "10.116.28.19",
+      "10.132.199.126",
+      "10.141.10.67",
+      "10.149.15.24",
+      "10.168.102.183",
+      "10.175.175.89",
+      "10.175.45.166",
+      "10.233.64.205",
+      "10.243.246.222",
+      "10.29.141.140",
+      "10.60.88.220",
+      "10.71.227.1",
+      "10.97.208.176"
+    ],
+    "hosts": [
+      "buildsrv01",
+      "ci-runner01",
+      "gitsrv01"
+    ]
+  },
+  "Engineering": {
+    "users": [
+      "anhthu",
+      "huydev",
+      "huyle",
+      "khanhng",
+      "linhfin",
+      "minhtq",
+      "ngocmai",
+      "quangdev",
+      "thuongf",
+      "tnghia",
+      "trinhk"
+    ],
+    "source_ips": [
+      "10.103.117.155",
+      "10.103.170.222",
+      "10.108.176.52",
+      "10.116.28.19",
+      "10.127.63.250",
+      "10.139.13.144",
+      "10.149.15.24",
+      "10.16.114.36",
+      "10.16.140.63",
+      "10.162.165.1",
+      "10.175.45.166",
+      "10.189.173.182",
+      "10.190.152.101",
+      "10.192.33.239",
+      "10.196.61.231",
+      "10.197.210.171",
+      "10.207.38.25",
+      "10.230.65.53",
+      "10.25.30.133",
+      "10.29.141.140",
+      "10.30.185.148",
+      "10.32.180.247",
+      "10.48.5.25",
+      "10.59.41.106",
+      "10.64.227.219",
+      "10.71.227.1",
+      "10.87.111.192",
+      "10.89.131.175",
+      "10.91.9.216",
+      "10.97.16.53",
+      "10.97.208.176"
+    ],
+    "hosts": [
+      "anhthu-dev1",
+      "anhthu-dev2",
+      "anhthu-dev3",
+      "anhthu-dev4",
+      "anhthu-dev5",
+      "anhthu-dev6",
+      "huydev-dev1",
+      "huydev-dev2",
+      "huydev-dev3",
+      "huyle-dev1",
+      "huyle-dev2",
+      "huyle-dev3",
+      "huyle-dev4",
+      "huyle-dev5",
+      "khanhng-dev1",
+      "khanhng-dev2",
+      "khanhng-dev3",
+      "khanhng-dev4",
+      "khanhng-dev5",
+      "linhfin-dev1",
+      "linhfin-dev2",
+      "linhfin-dev3",
+      "linhfin-dev4",
+      "linhfin-dev5",
+      "linhfin-dev6",
+      "minhtq-dev1",
+      "minhtq-dev2",
+      "minhtq-dev3",
+      "minhtq-dev4",
+      "minhtq-dev5",
+      "minhtq-dev6",
+      "ngocmai-dev1",
+      "ngocmai-dev2",
+      "ngocmai-dev3",
+      "ngocmai-dev4",
+      "ngocmai-dev5",
+      "ngocmai-dev6",
+      "quangdev-dev1",
+      "quangdev-dev2",
+      "quangdev-dev3",
+      "thuongf-dev1",
+      "thuongf-dev2",
+      "thuongf-dev3",
+      "thuongf-dev4",
+      "thuongf-dev5",
+      "thuongf-dev6",
+      "tnghia-dev1",
+      "tnghia-dev2",
+      "tnghia-dev3",
+      "trinhk-dev1",
+      "trinhk-dev2",
+      "trinhk-dev3",
+      "trinhk-dev4",
+      "trinhk-dev5",
+      "trinhk-dev6"
+    ]
+  }
+}
