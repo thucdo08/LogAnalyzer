@@ -139,6 +139,49 @@ def _fmt_local_vn(ts: pd.Timestamp) -> str:
         return str(ts)
 
 
+def _classify_ip(ip: str) -> tuple:
+    """
+    Classify IP as EXTERNAL or INTERNAL.
+    Returns (label, is_external) where:
+    - label is "EXTERNAL" for public IPs, "INTERNAL" for RFC1918 private IPs
+    - is_external is True for public IPs
+    
+    This helps SOC analysts quickly identify data exfiltration to external destinations.
+    
+    Note: RFC 5737 TEST-NET ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) are
+    treated as EXTERNAL because they represent external/attacker IPs in test log files.
+    """
+    try:
+        import ipaddress
+        ip_obj = ipaddress.ip_address(ip)
+        
+        # RFC 5737 TEST-NET ranges - these are used in documentation/testing to represent
+        # external/attacker IPs, so we should classify them as EXTERNAL despite being "reserved"
+        # TEST-NET-1: 192.0.2.0/24, TEST-NET-2: 198.51.100.0/24, TEST-NET-3: 203.0.113.0/24
+        test_net_ranges = [
+            ipaddress.ip_network("192.0.2.0/24"),
+            ipaddress.ip_network("198.51.100.0/24"),
+            ipaddress.ip_network("203.0.113.0/24"),
+        ]
+        
+        for test_net in test_net_ranges:
+            if ip_obj in test_net:
+                return "EXTERNAL", True  # TEST-NET = external attacker in test scenarios
+        
+        # Standard classification
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+            return "INTERNAL", False
+        elif ip_obj.is_reserved:
+            # Other reserved ranges (not TEST-NET) - treat as unknown/internal
+            return "RESERVED", False
+        else:
+            return "EXTERNAL", True
+    except Exception:
+        return "UNKNOWN", False
+
+
+
+
 def _count_user_downloads(df: pd.DataFrame) -> pd.DataFrame:
     """
     Build per-user total download counts within the provided dataframe window.
@@ -1482,7 +1525,7 @@ def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
             users_list = group["cron_user"].unique().tolist()
             if execution_count >= 10 and unique_users >= 3:
                 host = group["host"].iloc[0] if "host" in group.columns else "unknown"
-                alert_text = f"Cron job overlap: script '{script}' executed {execution_count} times by {unique_users} users"
+                alert_text = f"Cron job overlap: script '{script}' executed {execution_count} times by {unique_users} users. ⚠️ Có thể là kỹ thuật Defense Evasion - lợi dụng tiến trình backup/cron hợp pháp để che giấu hành vi đáng ngờ."
                 
                 # Calculate score first, then derive severity from score
                 cron_score = min(5.0 + (execution_count / 10), 8.0)
@@ -1494,7 +1537,12 @@ def _detect_cron_job_overlap(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     "score": cron_score,
                     "text": alert_text,
                     "evidence": {"script": str(script), "execution_count": int(execution_count), "unique_users": int(unique_users), "users": [str(u) for u in users_list]},
-                    "prompt_ctx": {"behavior": {"type": "cron_job_overlap"}},
+                    "prompt_ctx": {
+                        "behavior": {
+                            "type": "cron_job_overlap",
+                            "defense_evasion_warning": "Đây có thể là kỹ thuật ẩn mình (Defense Evasion), lợi dụng tiến trình backup/cron hợp pháp để che giấu hành vi gửi dữ liệu trái phép ra ngoài hoặc thực thi mã độc."
+                        }
+                    },
                 })
     except Exception as e:
         import sys
@@ -4368,10 +4416,15 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                                 score = max(base_score, 9.0)
                                 severity = "CRITICAL"
                                 reason = f"High login failure rate from EXTERNAL IP {src_ip} (likely attack)"
-                            elif failure_rate > 0.7:
+                            elif failure_rate >= 0.8:
+                                # >= 80% failure rate is almost certainly brute force attack
+                                score = max(base_score, 9.0)
+                                severity = "CRITICAL"
+                                reason = f"High login failure rate from {'EXTERNAL' if is_external else 'internal'} IP {src_ip} (brute force attack)"
+                            elif failure_rate > 0.5:
                                 score = base_score
-                                severity = "CRITICAL" if is_external else "WARNING"
-                                reason = f"High login failure rate from {'EXTERNAL' if is_external else 'internal'} IP {src_ip}"
+                                severity = "WARNING"
+                                reason = f"Elevated login failure rate from {'EXTERNAL' if is_external else 'internal'} IP {src_ip}"
                             else:
                                 score = base_score
                                 severity = "WARNING"
@@ -4446,21 +4499,45 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                         if key not in detected_transfers:
                             detected_transfers[key] = True
                             
+                            # Classify destination IP as EXTERNAL or INTERNAL
+                            ip_label, is_external = _classify_ip(dest_ip)
+                            mb_transferred = bytes_val / 1_000_000
+                            
+                            # Calculate score - boost for external destinations
+                            base_score = (bytes_val / 100_000_000) * 9.5
+                            if is_external:
+                                base_score = max(base_score, 9.0)  # Minimum 9.0 for external
+                            final_score = min(base_score, 10.0)
+                            
                             ctx = {
                                 "user": username,
                                 "group": None,
-                                "behavior": {"type": "data_exfiltration", "bytes": bytes_val, "destination": dest_ip},
+                                "behavior": {
+                                    "type": "data_exfiltration", 
+                                    "bytes": bytes_val, 
+                                    "destination": dest_ip,
+                                    "destination_type": ip_label,
+                                    "is_external": is_external
+                                },
                                 "time": _fmt_local_vn(timestamp),
                                 "baseline": {"max_normal_transfer": "50MB"},
-                                "extras": {"reason": f"Large SCP transfer detected: {bytes_val / 1_000_000:.1f}MB to {dest_ip}"},
+                                "extras": {"reason": f"Large SCP transfer detected: {mb_transferred:.1f}MB to {ip_label} IP {dest_ip}"},
                             }
                             alerts.append({
                                 "type": "data_exfiltration_detected",
                                 "subject": username,
                                 "severity": "CRITICAL",
-                                "score": min((bytes_val / 100_000_000) * 9.5, 10.0),
-                                "text": f"[CRITICAL] DATA EXFILTRATION: User '{username}' transferred {bytes_val / 1_000_000:.1f}MB to {dest_ip}",
-                                "evidence": {"user": username, "bytes": int(bytes_val), "destination": dest_ip, "method": "scp", "hostname": hostname},
+                                "score": final_score,
+                                "text": f"🚨 [CRITICAL] DATA EXFILTRATION: User '{username}' transferred {mb_transferred:.1f}MB to {ip_label} IP {dest_ip}",
+                                "evidence": {
+                                    "user": username, 
+                                    "bytes": int(bytes_val), 
+                                    "destination": dest_ip, 
+                                    "destination_type": ip_label,
+                                    "is_external_destination": is_external,
+                                    "method": "scp", 
+                                    "hostname": hostname
+                                },
                                 "prompt_ctx": ctx,
                             })
                 
@@ -4471,37 +4548,65 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                     dest_ip = netfilter_match.group(2)
                     # Flag if > 50MB
                     if bytes_val > 50_000_000:
-                        # Try to get username, fallback to source_ip, then hostname
+                        # Try to get username, fallback to source_ip with clear labeling
                         username = str(row.get("username", "")).strip()
-                        if not username or username in ["(unknown)", "nan", ""]:
-                            # Try source_ip as fallback
-                            source_ip = str(row.get("source_ip", "")).strip()
-                            if source_ip and source_ip not in ["", "nan"]:
-                                username = source_ip
-                            else:
-                                username = hostname if hostname else "(unknown)"
+                        source_ip = str(row.get("source_ip", "")).strip()
                         
-                        key = (username, "netfilter", bytes_val, dest_ip)
+                        # Handle None/unknown user - show source IP for investigation
+                        if not username or username in ["(unknown)", "nan", "", "None"]:
+                            if source_ip and source_ip not in ["", "nan"]:
+                                # Clear labeling: "Unknown User (Source IP: x.x.x.x)"
+                                display_name = f"Unknown User (Source IP: {source_ip})"
+                            else:
+                                display_name = f"Unknown User (Host: {hostname})" if hostname else "Unknown User"
+                        else:
+                            display_name = username
+                        
+                        # Classify destination IP as EXTERNAL or INTERNAL
+                        ip_label, is_external = _classify_ip(dest_ip)
+                        mb_transferred = bytes_val / 1_000_000
+                        
+                        # Calculate score - boost for external destinations
+                        base_score = (bytes_val / 100_000_000) * 9.0
+                        if is_external:
+                            base_score = max(base_score, 9.0)  # Minimum 9.0 for external
+                        final_score = min(base_score, 10.0)
+                        
+                        key = (display_name, "netfilter", bytes_val, dest_ip)
                         if key not in detected_transfers:
                             detected_transfers[key] = True
                             
                             ctx = {
-                                "user": username,
+                                "user": display_name,
                                 "group": None,
-                                "behavior": {"type": "data_exfiltration", "bytes": bytes_val, "destination": dest_ip},
+                                "behavior": {
+                                    "type": "data_exfiltration", 
+                                    "bytes": bytes_val, 
+                                    "destination": dest_ip,
+                                    "destination_type": ip_label,
+                                    "is_external": is_external,
+                                    "source_ip": source_ip if source_ip else None
+                                },
                                 "time": _fmt_local_vn(timestamp),
                                 "baseline": {"max_normal_transfer": "50MB"},
-                                "extras": {"reason": f"Large network transfer detected: {bytes_val / 1_000_000:.1f}MB"},
+                                "extras": {"reason": f"Large network transfer detected: {mb_transferred:.1f}MB to {ip_label} IP {dest_ip}"},
                             }
-                            # Use username as subject for USER-CENTRIC alerts
-                            subject = username if username and username != "(unknown)" else hostname
                             alerts.append({
                                 "type": "data_exfiltration_detected",
-                                "subject": subject,  # USER-CENTRIC: use username, not hostname
+                                "subject": display_name,  # USER-CENTRIC with clear "Unknown User" labeling
                                 "severity": "CRITICAL",
-                                "score": min((bytes_val / 100_000_000) * 9.0, 10.0),
-                                "text": f"[CRITICAL] DATA EXFILTRATION: User '{subject}' transferred {bytes_val / 1_000_000:.1f}MB to {dest_ip}",
-                                "evidence": {"user": subject, "bytes": int(bytes_val), "destination": dest_ip, "source_host": hostname, "method": "network"},
+                                "score": final_score,
+                                "text": f"🚨 [CRITICAL] DATA EXFILTRATION: '{display_name}' transferred {mb_transferred:.1f}MB to {ip_label} IP {dest_ip}",
+                                "evidence": {
+                                    "user": display_name, 
+                                    "bytes": int(bytes_val), 
+                                    "destination": dest_ip, 
+                                    "destination_type": ip_label,
+                                    "is_external_destination": is_external,
+                                    "source_ip": source_ip if source_ip else None,
+                                    "source_host": hostname, 
+                                    "method": "network"
+                                },
                                 "prompt_ctx": ctx,
                             })
         except Exception as e:
@@ -4523,20 +4628,33 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
             
             for idx, row in df.iterrows():
                 msg = str(row.get("message", "")).lower()
-                username = str(row.get("username", "(unknown)")).strip()
-                if not username:
-                    username = "(unknown)"
+                raw_username = row.get("username", "")
+                username = str(raw_username).strip() if raw_username else ""
+                
+                # Handle None/empty/unknown username - provide context from hostname or source_ip
+                if not username or username in ["(unknown)", "nan", "", "None", "none"]:
+                    hostname = str(row.get("host", "")).strip()
+                    source_ip = str(row.get("source_ip", "")).strip()
+                    if source_ip and source_ip not in ["", "nan", "None"]:
+                        display_name = f"Unknown User (Source IP: {source_ip})"
+                    elif hostname and hostname not in ["", "nan", "None"]:
+                        display_name = f"Unknown User (Host: {hostname})"
+                    else:
+                        display_name = "Unknown User"
+                else:
+                    display_name = username
+                
                 timestamp = row.get("timestamp")
                 
                 for pattern, pattern_name, score in priv_escalation_patterns:
                     if re.search(pattern, msg, re.IGNORECASE):
-                        key = (username, pattern_name)
+                        key = (display_name, pattern_name)
                         if key in detected_privesc:
                             continue
                         detected_privesc[key] = True
                         
                         ctx = {
-                            "user": username,
+                            "user": display_name,
                             "group": None,
                             "behavior": {"type": "privilege_escalation", "method": pattern_name},
                             "time": _fmt_local_vn(timestamp),
@@ -4545,13 +4663,260 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                         }
                         alerts.append({
                             "type": "privilege_escalation_detected",
-                            "subject": username,
+                            "subject": display_name,
                             "severity": "CRITICAL",
                             "score": score,
-                            "text": f"Privilege escalation by {username}: {msg[:200]}",
-                            "evidence": {"method": pattern_name, "message": msg[:300]},
+                            "text": f"🚨 Privilege escalation by {display_name}: {msg[:200]}",
+                            "evidence": {"method": pattern_name, "message": msg[:300], "original_user": username if username else "None"},
                             "prompt_ctx": ctx,
                         })
+        except Exception:
+            pass
+    
+    # 0E) Sensitive Database Access Detection - detect queries to sensitive tables
+    if "message" in df.columns:
+        try:
+            # Sensitive database access patterns
+            sensitive_db_patterns = [
+                {
+                    "pattern": r"COPY\s+(salary|payroll|employee|customers?|credit_card|ssn|password)\s+TO",
+                    "severity": "CRITICAL",
+                    "score": 9.5,
+                    "name": "data_export",
+                    "description": "Data export via COPY command - extracting sensitive table data"
+                },
+                {
+                    "pattern": r"SELECT\s+\*\s+FROM\s+(salary|payroll)\s+WHERE",
+                    "severity": "CRITICAL",
+                    "score": 8.5,
+                    "name": "salary_query",
+                    "description": "Query to salary/payroll table - potential data theft"
+                },
+                {
+                    "pattern": r"SELECT\s+\*\s+FROM\s+employee[s]?\s+PII|SELECT.*FROM.*(pii|ssn|credit_card)",
+                    "severity": "CRITICAL",
+                    "score": 9.0,
+                    "name": "pii_query",
+                    "description": "Query to PII data - accessing personally identifiable information"
+                },
+                {
+                    "pattern": r"(mysqldump|pg_dump)\s+.*--password|--all-databases",
+                    "severity": "CRITICAL",
+                    "score": 9.5,
+                    "name": "database_dump",
+                    "description": "Database dump - potential data exfiltration"
+                },
+            ]
+            
+            detected_db_access = {}  # (username, pattern_name, host) -> bool to avoid duplicates
+            
+            for idx, row in df.iterrows():
+                msg = str(row.get("message", ""))
+                raw_username = row.get("username", "")
+                username = str(raw_username).strip() if raw_username else ""
+                timestamp = row.get("timestamp")
+                host = str(row.get("host", "")).strip()
+                
+                # Extract username from postgres log format: [local] user@database LOG:
+                postgres_match = re.search(r"\[local\]\s+(\w+)@(\w+)\s+LOG:", msg)
+                if postgres_match:
+                    username = postgres_match.group(1)
+                    database = postgres_match.group(2)
+                else:
+                    database = "unknown"
+                
+                # Handle None/empty username
+                if not username or username in ["(unknown)", "nan", "", "None", "none"]:
+                    if host and host not in ["", "nan", "None"]:
+                        display_name = f"Unknown User (Host: {host})"
+                    else:
+                        display_name = "Unknown User"
+                else:
+                    display_name = username
+                
+                for pattern_info in sensitive_db_patterns:
+                    if re.search(pattern_info["pattern"], msg, re.IGNORECASE):
+                        key = (display_name, pattern_info["name"], host)
+                        if key in detected_db_access:
+                            # Increment count
+                            detected_db_access[key]["count"] += 1
+                            continue
+                        
+                        detected_db_access[key] = {
+                            "count": 1,
+                            "display_name": display_name,
+                            "pattern_info": pattern_info,
+                            "database": database,
+                            "host": host,
+                            "timestamp": timestamp,
+                            "sample_query": msg[:300],
+                        }
+            
+            # Generate alerts for detected sensitive DB access
+            for key, data in detected_db_access.items():
+                pattern_info = data["pattern_info"]
+                ctx = {
+                    "user": data["display_name"],
+                    "group": None,
+                    "behavior": {"type": "sensitive_db_access", "method": pattern_info["name"]},
+                    "time": _fmt_local_vn(data["timestamp"]),
+                    "baseline": {},
+                    "extras": {
+                        "database": data["database"],
+                        "host": data["host"],
+                        "query_count": data["count"],
+                    },
+                }
+                
+                alerts.append({
+                    "type": "sensitive_db_access_detected",
+                    "subject": data["display_name"],
+                    "severity": pattern_info["severity"],
+                    "score": pattern_info["score"],
+                    "text": f"🚨 SENSITIVE DATABASE ACCESS: User '{data['display_name']}' performed {data['count']}x {pattern_info['name']} on {data['database']}@{data['host']}. {pattern_info['description']}",
+                    "evidence": {
+                        "method": pattern_info["name"],
+                        "database": data["database"],
+                        "host": data["host"],
+                        "query_count": data["count"],
+                        "sample_query": data["sample_query"],
+                    },
+                    "prompt_ctx": ctx,
+                })
+        except Exception:
+            pass
+    
+    # 0F) Service Manipulation Detection - detect suspicious service stop/restart
+    if "message" in df.columns:
+        try:
+            # Service manipulation patterns - stopping critical services
+            service_manipulation_patterns = [
+                {
+                    "pattern": r"Stopping\s+auditd\s+service|auditd\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 9.5,
+                    "name": "auditd_stop",
+                    "description": "🚨 DEFENSE EVASION: Stopping auditd service - disabling security logging"
+                },
+                {
+                    "pattern": r"Stopping\s+postgresql\s+service|postgresql\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 9.0,
+                    "name": "postgresql_stop",
+                    "description": "Database service shutdown - potential data attack or denial of service"
+                },
+                {
+                    "pattern": r"Stopping\s+mysql\s+service|mysql\.service:\s*Deactivated|mariadb\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 9.0,
+                    "name": "mysql_stop",
+                    "description": "Database service shutdown - potential data attack or denial of service"
+                },
+                {
+                    "pattern": r"Stopping\s+nginx\s+service|nginx\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 8.5,
+                    "name": "nginx_stop",
+                    "description": "Web server shutdown - service disruption or pre-attack preparation"
+                },
+                {
+                    "pattern": r"Stopping\s+apache2?\s+service|apache2?\.service:\s*Deactivated|httpd\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 8.5,
+                    "name": "apache_stop",
+                    "description": "Web server shutdown - service disruption or pre-attack preparation"
+                },
+                {
+                    "pattern": r"Stopping\s+ssh\s+service|ssh\.service:\s*Deactivated|sshd\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 9.0,
+                    "name": "ssh_stop",
+                    "description": "SSH service shutdown - denying remote access or hiding activity"
+                },
+                {
+                    "pattern": r"Stopping\s+firewalld\s+service|firewalld\.service:\s*Deactivated|ufw\.service:\s*Deactivated",
+                    "severity": "CRITICAL",
+                    "score": 9.5,
+                    "name": "firewall_stop",
+                    "description": "🚨 DEFENSE EVASION: Firewall shutdown - disabling network security"
+                },
+            ]
+            
+            detected_service_manipulations = {}  # (username, pattern_name, host) -> data
+            
+            for idx, row in df.iterrows():
+                msg = str(row.get("message", ""))
+                raw_username = row.get("username", "")
+                username = str(raw_username).strip() if raw_username else ""
+                timestamp = row.get("timestamp")
+                host = str(row.get("host", "")).strip()
+                
+                # Extract username from "requested by user" pattern
+                requested_by_match = re.search(r"\(requested\s+by\s+(\w+)\)", msg)
+                if requested_by_match:
+                    username = requested_by_match.group(1)
+                
+                # Handle None/empty username
+                if not username or username in ["(unknown)", "nan", "", "None", "none"]:
+                    if host and host not in ["", "nan", "None"]:
+                        display_name = f"Unknown User (Host: {host})"
+                    else:
+                        display_name = "Unknown User"
+                else:
+                    display_name = username
+                
+                for pattern_info in service_manipulation_patterns:
+                    if re.search(pattern_info["pattern"], msg, re.IGNORECASE):
+                        key = (display_name, pattern_info["name"], host)
+                        if key in detected_service_manipulations:
+                            detected_service_manipulations[key]["count"] += 1
+                            continue
+                        
+                        detected_service_manipulations[key] = {
+                            "count": 1,
+                            "display_name": display_name,
+                            "pattern_info": pattern_info,
+                            "host": host,
+                            "timestamp": timestamp,
+                            "sample_message": msg[:300],
+                        }
+            
+            # Generate alerts for detected service manipulations
+            for key, data in detected_service_manipulations.items():
+                pattern_info = data["pattern_info"]
+                is_defense_evasion = pattern_info["name"] in ["auditd_stop", "firewall_stop"]
+                
+                ctx = {
+                    "user": data["display_name"],
+                    "group": None,
+                    "behavior": {
+                        "type": "service_manipulation",
+                        "method": pattern_info["name"],
+                        "defense_evasion": is_defense_evasion,
+                    },
+                    "time": _fmt_local_vn(data["timestamp"]),
+                    "baseline": {},
+                    "extras": {
+                        "host": data["host"],
+                        "stop_count": data["count"],
+                    },
+                }
+                
+                alerts.append({
+                    "type": "service_manipulation_detected",
+                    "subject": data["display_name"],
+                    "severity": pattern_info["severity"],
+                    "score": pattern_info["score"],
+                    "text": f"🚨 SERVICE MANIPULATION: User '{data['display_name']}' stopped {pattern_info['name'].replace('_stop', '')} {data['count']}x on {data['host']}. {pattern_info['description']}",
+                    "evidence": {
+                        "method": pattern_info["name"],
+                        "host": data["host"],
+                        "stop_count": data["count"],
+                        "sample_message": data["sample_message"],
+                        "defense_evasion": is_defense_evasion,
+                    },
+                    "prompt_ctx": ctx,
+                })
         except Exception:
             pass
     
@@ -5507,7 +5872,124 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
         svc_persist_alerts = _detect_windows_service_persistence(df)
         alerts.extend(svc_persist_alerts)
 
+    # =========================================================================
+    # ATTACK CHAIN CORRELATION (Step 5 improvement)
+    # Detect organized attacks: users with BOTH lateral movement AND exfiltration
+    # =========================================================================
+    alerts = _detect_attack_chain_correlation(alerts)
+
     return alerts
+
+
+def _detect_attack_chain_correlation(alerts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Correlate lateral movement + exfiltration to detect organized attacks.
+    
+    Creates summary alerts for users who show BOTH:
+    - ssh_lateral_movement (logging in from multiple IPs)
+    - data_exfiltration_detected (transferring large amounts of data)
+    
+    This pattern indicates a coordinated attack with compromised credentials.
+    """
+    if not alerts:
+        return alerts
+    
+    try:
+        # Group alerts by subject (user)
+        user_alerts = {}
+        for alert in alerts:
+            user = alert.get("subject", "")
+            if not user or user == "(unknown)":
+                continue
+            if user not in user_alerts:
+                user_alerts[user] = []
+            user_alerts[user].append(alert)
+        
+        # Find users with BOTH lateral movement AND exfiltration
+        chain_alerts = []
+        correlated_users = []
+        
+        for user, user_alert_list in user_alerts.items():
+            alert_types = set(a.get("type") for a in user_alert_list)
+            has_lateral = "ssh_lateral_movement" in alert_types
+            has_exfil = "data_exfiltration_detected" in alert_types
+            
+            if has_lateral and has_exfil:
+                correlated_users.append(user)
+                
+                # Calculate total exfiltrated bytes
+                exfil_alerts = [a for a in user_alert_list if a["type"] == "data_exfiltration_detected"]
+                total_bytes = sum(a.get("evidence", {}).get("bytes", 0) for a in exfil_alerts)
+                dest_ips = set()
+                external_count = 0
+                for a in exfil_alerts:
+                    dest = a.get("evidence", {}).get("destination", "")
+                    if dest:
+                        dest_ips.add(dest)
+                    if a.get("evidence", {}).get("is_external_destination", False):
+                        external_count += 1
+                
+                # Get lateral movement details
+                lateral_alerts = [a for a in user_alert_list if a["type"] == "ssh_lateral_movement"]
+                source_ips = set()
+                for a in lateral_alerts:
+                    ips = a.get("evidence", {}).get("source_ips", [])
+                    source_ips.update(ips)
+                
+                mb_total = total_bytes / 1_000_000
+                
+                chain_alerts.append({
+                    "type": "organized_attack_chain",
+                    "subject": user,
+                    "severity": "CRITICAL",
+                    "score": 10.0,  # Maximum severity - organized attack
+                    "text": f"🚨 PHÁT HIỆN TẤN CÔNG CÓ TỔ CHỨC: User '{user}' thực hiện Lateral Movement (từ {len(source_ips)} IPs) → Exfiltration ({mb_total:.1f}MB đến {len(dest_ips)} IP đích, {external_count} external).",
+                    "evidence": {
+                        "attack_phases": ["lateral_movement", "data_exfiltration"],
+                        "total_bytes_exfiltrated": int(total_bytes),
+                        "total_mb_exfiltrated": round(mb_total, 1),
+                        "destination_ips": list(dest_ips),
+                        "external_destination_count": external_count,
+                        "source_login_ips": list(source_ips),
+                        "exfiltration_alert_count": len(exfil_alerts),
+                        "lateral_movement_alert_count": len(lateral_alerts),
+                    },
+                    "prompt_ctx": {
+                        "user": user,
+                        "behavior": {
+                            "type": "organized_attack_chain",
+                            "summary": "Các tài khoản bị chiếm đoạt thực hiện di chuyển ngang (Lateral Movement) để gom dữ liệu, sau đó đồng loạt gửi dữ liệu ra ngoài (Exfiltration) tới cùng một nhóm IP đích trong khoảng thời gian ngắn. Đây là dấu hiệu rõ ràng của cuộc tấn công có tổ chức."
+                        }
+                    }
+                })
+        
+        # Add summary alert if multiple users are correlated
+        if len(correlated_users) >= 2:
+            chain_alerts.append({
+                "type": "coordinated_attack_summary",
+                "subject": f"{len(correlated_users)} users",
+                "severity": "CRITICAL",
+                "score": 10.0,
+                "text": f"🚨🚨 CẢNH BÁO TẤN CÔNG PHỐI HỢP: {len(correlated_users)} tài khoản ({', '.join(correlated_users[:5])}{' và khác...' if len(correlated_users) > 5 else ''}) đều thể hiện chuỗi hành vi Lateral Movement → Data Exfiltration. Đây là dấu hiệu của cuộc tấn công có tổ chức quy mô lớn.",
+                "evidence": {
+                    "attack_type": "coordinated_multi_user_attack",
+                    "affected_users": correlated_users,
+                    "affected_user_count": len(correlated_users),
+                },
+                "prompt_ctx": {
+                    "behavior": {
+                        "type": "coordinated_attack",
+                        "summary": f"Phát hiện {len(correlated_users)} người dùng cùng thực hiện chuỗi tấn công tương tự, cho thấy đây là cuộc tấn công có chủ đích và phối hợp."
+                    }
+                }
+            })
+        
+        return alerts + chain_alerts
+    
+    except Exception as e:
+        import sys
+        print(f"[DEBUG] Attack chain correlation error: {e}", file=sys.stderr)
+        return alerts
 
 
 def build_prompt_for_alert(alert: Dict[str, Any]) -> str:

@@ -734,6 +734,13 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                     "windows_privilege_escalation_detected",
                     "schtask_persistence_detected",
                     "service_persistence_detected",
+                    "data_exfiltration_detected",  # Data exfiltration to external IPs - Tier 1 priority
+                    "organized_attack_chain",      # Lateral Movement + Exfiltration correlation
+                    "persistence_technique_detected",  # Crontab injection, reverse shell, RCE - Tier 1 priority
+                    "privilege_escalation_detected",  # sudo abuse, chmod u+s, visudo - Tier 1 priority
+                    "sensitive_db_access_detected",  # Database data export, PII queries - Tier 1 priority
+                    "service_manipulation_detected",  # Stopping auditd/firewall (Defense Evasion), critical services - Tier 1 priority
+                    "credential_bruteforce_detected",  # SSH brute force with high failure rate - Tier 1 priority
                 ]
                 has_high_confidence_attack = any(
                     a.get("type") in HIGH_CONFIDENCE_ATTACK_TYPES
