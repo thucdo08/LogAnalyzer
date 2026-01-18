@@ -1229,6 +1229,12 @@ def _parse_dns(lines, assume_year=None):
             # or: forwarded example.com to 8.8.8.8
             # or: reply example.com is 192.168.1.1
             
+            # Extract query type from query[TYPE] pattern
+            query_type = None
+            type_match = re.search(r'query\[(\w+)\]', msg)
+            if type_match:
+                query_type = type_match.group(1)  # e.g., "TXT", "A", "AAAA", "MX"
+            
             # Extract domain
             domain_match = re.search(r'(?:query\[\w+\]\s+|forwarded\s+|reply\s+)(\S+)', msg)
             if domain_match:
@@ -1254,10 +1260,17 @@ def _parse_dns(lines, assume_year=None):
                 status = "info"
             elif "reply" in msg:
                 action = "reply"
-                status = "success"
+                # Check for LARGE_ANSWER (DNS amplification indicator)
+                if "LARGE_ANSWER" in msg or "is LARGE" in msg:
+                    status = "large_answer"
+                # Check for NXDOMAIN (DNS storm indicator)  
+                elif "NXDOMAIN" in msg:
+                    status = "nxdomain"
+                else:
+                    status = "success"
             elif "NXDOMAIN" in msg or "refused" in msg:
                 action = "refused"
-                status = "failed"
+                status = "nxdomain" if "NXDOMAIN" in msg else "failed"
             else:
                 action = "dns_event"
                 status = "info"
@@ -1287,6 +1300,7 @@ def _parse_dns(lines, assume_year=None):
             "pid": m["pid"],
             "source_ip": source_ip,
             "domain": domain,
+            "query_type": query_type,  # TXT, A, AAAA, MX, etc.
             "action": action,
             "status": status,
             "message": msg

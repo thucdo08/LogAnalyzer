@@ -1625,11 +1625,16 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                 })
             
             # Track NXDOMAIN
-            if row.get("status") == "nxdomain":
+            status_val = row.get("status")
+            if status_val == "nxdomain":
                 user_activities[username]["nxdomain_queries"].append({
                     "domain": row.get("domain"),
                     "timestamp": str(row.get("timestamp", ""))
                 })
+            elif "NXDOMAIN" in str(row.get("message", "")) and status_val != "nxdomain":
+                # Debug: NXDOMAIN in message but status is not "nxdomain"
+                print(f"[DEBUG] DNS: NXDOMAIN in message but status={status_val}, message={str(row.get('message', ''))[:80]}", file=sys.stderr)
+            
             
             # Track suspicious domains (DGA-like)
             domain = str(row.get("domain", ""))
@@ -1649,7 +1654,14 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                         "timestamp": str(row.get("timestamp", ""))
                     })
         
+        
         print(f"[DEBUG] DNS: Analyzing {len(user_activities)} users/IPs", file=sys.stderr)
+        
+        # Debug: Print NXDOMAIN counts for each user
+        for username, activities in user_activities.items():
+            nxdomain_count = len(activities["nxdomain_queries"])
+            if nxdomain_count > 0:
+                print(f"[DEBUG] DNS: User {username} has {nxdomain_count} NXDOMAIN queries", file=sys.stderr)
         
         # Generate alerts per user
         for username, activities in user_activities.items():
@@ -1692,6 +1704,44 @@ def _detect_dns_anomalies(df: pd.DataFrame) -> List[Dict[str, Any]]:
                     },
                     "prompt_ctx": {"user": username, "behavior": {"type": "dns_nxdomain_flood"}},
                 })
+            
+            # ALERT 2B: NXDOMAIN Storm (DoS Attack)
+            # Detect high-volume NXDOMAIN in short time = DNS DoS attack
+            if len(activities["nxdomain_queries"]) >= 50:
+                # Calculate time span for the NXDOMAIN queries
+                try:
+                    timestamps = [pd.to_datetime(q["timestamp"]) for q in activities["nxdomain_queries"] if q.get("timestamp")]
+                    if timestamps:
+                        timestamps = [ts for ts in timestamps if pd.notna(ts)]  # Filter out invalid timestamps
+                        
+                        if len(timestamps) >= 2:
+                            time_span = (max(timestamps) - min(timestamps)).total_seconds() / 60  # Convert to minutes
+                            
+                            # If 50+ NXDOMAIN in < 15 minutes = Storm attack (DoS)
+                            if time_span < 15:
+                                alert_text = f"User/IP {username}: {len(activities['nxdomain_queries'])} NXDOMAIN queries in {time_span:.1f} minutes - NXDOMAIN Storm DoS attack"
+                                
+                                # Use unified scoring - CRITICAL severity
+                                score_data = scoring.get_alert_metadata("dns_nxdomain_storm", [])
+                                
+                                alerts.append({
+                                    "type": "dns_nxdomain_storm",
+                                    "subject": username,
+                                    "severity": score_data["severity"],
+                                    "score": score_data["score"],
+                                    "text": alert_text,
+                                    "evidence": {
+                                        "nxdomain_count": len(activities["nxdomain_queries"]),
+                                        "duration_minutes": round(time_span, 1),
+                                        "examples": activities["nxdomain_queries"][:5],
+                                        "pattern": "nxdomain_storm"
+                                    },
+                                    "prompt_ctx": {"user": username, "behavior": {"type": "dns_nxdomain_storm"}},
+                                })
+                except Exception as e:
+                    import sys
+                    print(f"[DEBUG] NXDOMAIN Storm time calculation error: {e}", file=sys.stderr)
+            
             
             # ALERT 3: Suspicious Domains (DGA/Malware)
             if len(activities["suspicious_domains"]) >= 3:
