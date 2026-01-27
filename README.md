@@ -168,16 +168,15 @@ LogAnalyze/
 
 ## Supported Log Types
 
-- linuxsyslog
-- windows_eventlog
+- apache
+- dhcp
+- dns
 - edr
 - firewall
+- linuxsyslog
 - router
-- dns
-- dhcp
-- apache
-- proxy
-- ids
+- windows_eventlog
+
 
 ## API Endpoints
 
