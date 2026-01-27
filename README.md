@@ -12,7 +12,7 @@ You will need the following things properly installed on your computer.
 - Python 3.11+
 - MongoDB Atlas or MongoDB 5+
 
-Additionally, based on the backend and frontend implementations, you may need to install additional software. Please see their README's for more info.
+Additionally, based on the backend and frontend implementations, you may need to install additional software.
 
 ## Database Setup
 
@@ -22,27 +22,63 @@ The database schema is automatically created when baselines are trained via the 
 
 ## Backend Setup
 
-This project has Flask-based backend implementation which is designed to handle log processing, anomaly detection, and AI analysis.
+The backend is a Flask-based REST API that handles log processing, anomaly detection, and AI analysis.
 
-Please choose any of the following implementations and setup as guided in their README's.
+**Installation:**
 
-- **Flask Backend** (backend)
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# or
+source .venv/bin/activate  # Linux/Mac
+pip install -r requirements.txt
+```
 
-Setup instructions can be found in `backend/README.md`
+**Starting the Backend:**
+
+```bash
+python app.py
+```
+
+or using Uvicorn:
+
+```bash
+uvicorn app:app --reload --port 8000
+```
+
+Backend will be available at: `http://localhost:8000`
+
+**Health Check:** `http://localhost:8000/health`
 
 ## Frontend Setup
 
-This project has a React-based frontend implementation which provides a web interface for the log analysis platform.
+The frontend is a React application built with Vite that provides a web interface for uploading logs, viewing analysis results, and managing baselines.
 
-Please choose any of the following implementations and setup as guided in their README's.
+**Installation:**
 
-- **React Frontend** (frontend)
+```bash
+cd frontend
+npm install
+```
 
-Setup instructions can be found in `frontend/README.md`
+**Starting the Frontend (Development):**
+
+```bash
+npm run dev
+```
+
+Frontend will be available at: `http://localhost:5173`
+
+**Building for Production:**
+
+```bash
+npm run build
+```
 
 ## Running Backend and Frontend
 
-(1) Follow instructions for setting up the backend implementation and starting it. They can be found in `backend/README.md`
+(1) Follow instructions for setting up the backend implementation and starting it:
 
 ```bash
 cd backend
@@ -54,9 +90,8 @@ python app.py
 
 Backend will be available at: `http://localhost:8000`
 
-(2) Follow instructions for setting up the frontend implementation and starting it. They can be found in `frontend/README.md`
+(2) Follow instructions for setting up the frontend implementation and starting it (open a new terminal):
 
-Open a new terminal:
 ```bash
 cd frontend
 npm install
@@ -65,7 +100,7 @@ npm run dev
 
 Frontend will be available at: `http://localhost:5173`
 
-(3) Alternatively, follow instructions for starting up Docker containers using Docker Compose found in the root `docker-compose.yml`:
+(3) Alternatively, follow instructions for starting up Docker containers using Docker Compose:
 
 ```bash
 docker-compose up -d
@@ -83,6 +118,7 @@ LogAnalyze/
 ├── backend/                      # Flask REST API
 │   ├── app.py                   # Main application
 │   ├── requirements.txt         # Python dependencies
+│   ├── Dockerfile              # Docker configuration
 │   ├── config/                  # Configuration files
 │   │   ├── rules.json
 │   │   ├── scoring.json
@@ -94,18 +130,30 @@ LogAnalyze/
 │   │   ├── preprocess.py
 │   │   ├── postprocess.py
 │   │   ├── database.py
-│   │   └── ...
+│   │   ├── alert.py
+│   │   ├── enrich.py
+│   │   ├── filters.py
+│   │   ├── scoring.py
+│   │   └── validator.py
 │   └── utils/                   # Utility modules
+│       ├── file_handler.py
+│       └── syslog_parser.py
 ├── frontend/                     # React web application
 │   ├── src/
-│   │   ├── App.jsx
-│   │   ├── index.css
-│   │   └── main.jsx
-│   ├── package.json
-│   ├── vite.config.js
+│   │   ├── App.jsx             # Main component
+│   │   ├── App.css             # Styles
+│   │   ├── index.css           # Global styles
+│   │   ├── main.jsx            # Entry point
+│   │   └── assets/
+│   ├── package.json            # JavaScript dependencies
+│   ├── vite.config.js          # Vite configuration
+│   ├── Dockerfile              # Docker configuration
+│   ├── nginx.conf              # Nginx configuration
+│   ├── eslint.config.js        # ESLint configuration
 │   └── public/
-├── docker-compose.yml           # Docker Compose configuration
-└── Jenkinsfile                  # CI/CD pipeline
+├── docker-compose.yml          # Docker Compose configuration
+├── Jenkinsfile                 # CI/CD pipeline
+└── README.md                   # This file
 ```
 
 ## Key Features
@@ -134,31 +182,64 @@ LogAnalyze/
 ## API Endpoints
 
 **Analysis:**
-- POST /analyze
-- POST /anomaly/raw
-- POST /anomaly/prompt
-- POST /anomaly/batch-analyze
+- `POST /analyze` - Complete pipeline analysis
+- `POST /anomaly/raw` - Generate raw anomaly alerts
+- `POST /anomaly/prompt` - AI analysis of alerts
+- `POST /anomaly/batch-analyze` - Batch process alerts
 
 **Baseline Management:**
-- POST /baseline/train
-- GET /baseline/status
-- GET /baseline/members
+- `POST /baseline/train` - Train baseline models
+- `GET /baseline/status` - Check baseline status
+- `GET /baseline/members` - View group memberships
 
 **Health & Status:**
-- GET /health
-- GET /ai/status
-- GET /api/health/mongodb
+- `GET /health` - Health check
+- `GET /ai/status` - Check AI API status
+- `GET /api/health/mongodb` - Check MongoDB connection
+
+**Alerting:**
+- `POST /send-analysis-alerts` - Send analyzed alerts
+- `POST /send-raw-anomalies` - Send raw anomaly alerts
+- `POST /send-telegram` - Send Telegram notification
+- `POST /send-zalo` - Send Zalo notification
 
 ## Tech Stack
 
 **Backend:**
-- Flask, Pandas, NumPy, MongoDB, OpenAI API, scikit-learn
+- Flask, Pandas, NumPy, MongoDB, OpenAI API, scikit-learn, Uvicorn
 
 **Frontend:**
-- React 19, Vite, PrimeReact, Tailwind CSS
+- React 19, Vite, PrimeReact, Tailwind CSS, ESLint
 
 **Infrastructure:**
-- Docker, Docker Compose, Jenkins
+- Docker, Docker Compose, Jenkins, Nginx
+
+## Environment Configuration
+
+The application requires configuration through environment variables. Create a `.env` file in the `backend` directory with required settings such as:
+
+- `OPENAI_API_KEY` - OpenAI API key for AI analysis
+- `MONGO_URI` - MongoDB connection string
+- `MONGO_DB_NAME` - MongoDB database name
+- `N8N_WEBHOOK_URL` - N8N webhook for alerts (optional)
+
+## Troubleshooting
+
+**Backend not responding:**
+- Check if Python virtual environment is activated
+- Verify MongoDB connection and credentials
+- Check OpenAI API key is configured
+- Review logs from `python app.py`
+
+**Frontend not loading:**
+- Clear browser cache and restart dev server
+- Verify Node.js version is 18+
+- Check if backend API is running
+
+**Docker issues:**
+- Ensure Docker daemon is running
+- Verify ports 80, 8000 are not in use
+- Check `.env` file has required configuration
 
 ## Contributing
 
@@ -170,6 +251,7 @@ LogAnalyze/
 
 ## Support
 
-For detailed documentation on specific components:
-- Backend: `backend/README.md`
-- Frontend: `frontend/README.md`
+For additional help and documentation:
+- Review the API endpoint specifications in Backend Setup
+- Check configuration options in the Project Structure section
+- Review Dockerfile for containerization details
