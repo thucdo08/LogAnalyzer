@@ -214,33 +214,6 @@ LogAnalyze/
 **Infrastructure:**
 - Docker, Docker Compose, Jenkins, Nginx
 
-## Environment Configuration
-
-The application requires configuration through environment variables. Create a `.env` file in the `backend` directory with required settings such as:
-
-- `OPENAI_API_KEY` - OpenAI API key for AI analysis
-- `MONGO_URI` - MongoDB connection string
-- `MONGO_DB_NAME` - MongoDB database name
-- `N8N_WEBHOOK_URL` - N8N webhook for alerts (optional)
-
-## Troubleshooting
-
-**Backend not responding:**
-- Check if Python virtual environment is activated
-- Verify MongoDB connection and credentials
-- Check OpenAI API key is configured
-- Review logs from `python app.py`
-
-**Frontend not loading:**
-- Clear browser cache and restart dev server
-- Verify Node.js version is 18+
-- Check if backend API is running
-
-**Docker issues:**
-- Ensure Docker daemon is running
-- Verify ports 80, 8000 are not in use
-- Check `.env` file has required configuration
-
 ## Contributing
 
 1. Fork the repository
