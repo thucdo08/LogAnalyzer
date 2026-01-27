@@ -5,7 +5,10 @@ import "primereact/resources/primereact.min.css";
 import "primeicons/primeicons.css";
 import "./App.css";
 
-const API_BASE = "https://api.thuandoandevops.site";
+//const API_BASE = "https://api.thuandoandevops.site";
+// nếu muốn test localhost thì thay API_BASE
+const API_BASE = "http://localhost:8000";
+const BASELINE_GROUPS = ["engineering", "finance", "sales", "itadmin"];
 
 const SEVERITY_PRIORITY = {
   CRITICAL: 3,
@@ -25,6 +28,10 @@ export default function App() {
   const [resultsRaw, setResultsRaw] = useState([]); // AI gốc
   const [summaryRaw, setSummaryRaw] = useState({});
   const [eventsPM, setEventsPM] = useState([]);
+  const [baselineGroup, setBaselineGroup] = useState(BASELINE_GROUPS[0]);
+  const [baselineStatus, setBaselineStatus] = useState("");
+  const [showBaselineTrain, setShowBaselineTrain] = useState(false);
+  const [isTrainingBaseline, setIsTrainingBaseline] = useState(false);
 
   // bổ sung hiển thị
   const [providerOpenAI, setProviderOpenAI] = useState(null); // true/false/null
@@ -206,6 +213,52 @@ export default function App() {
     } catch (err) {
       console.error(err);
       setStatus("❌ Lỗi: " + (err?.message || "Không xác định"));
+    }
+  }
+
+  // huấn luyện baseline
+  async function baselineUploadHandler(e) {
+    const file = (e.files && e.files[0]) || null;
+    if (!file) {
+      setBaselineStatus("Vui lòng chọn file log baseline.");
+      return;
+    }
+    if (!baselineGroup) {
+      setBaselineStatus("Vui lòng chọn nhóm baseline.");
+      return;
+    }
+
+    setIsTrainingBaseline(true);
+    setBaselineStatus("⏳ Đang gửi yêu cầu huấn luyện baseline...");
+
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("group", baselineGroup);
+
+      const res = await fetch(`${API_BASE}/baseline/train`, {
+        method: "POST",
+        body: fd,
+      });
+
+      // cố gắng đọc JSON để lấy thông tin lỗi/ok
+      let data = null;
+      try {
+        data = await res.json();
+      } catch (_) {
+        /* ignore parse error */
+      }
+
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.error || "API baseline trả về lỗi");
+      }
+
+      setBaselineStatus("✅ Đã gửi huấn luyện baseline thành công.");
+    } catch (err) {
+      console.error(err);
+      setBaselineStatus("❌ Lỗi huấn luyện baseline: " + (err?.message || "Không xác định"));
+    } finally {
+      setIsTrainingBaseline(false);
     }
   }
 
@@ -396,367 +449,440 @@ export default function App() {
           ))}
         </div>
 
-        {/* Upload */}
-        <div className="flex justify-center">
-          <div className="w-full max-w-xl">
-            <FileUpload
-              name="file"
-              accept=".csv,.json,.ndjson,.txt,.log"
-              customUpload
-              uploadHandler={uploadHandler}
-              mode="advanced"
-              chooseLabel="Chọn file"
-              uploadLabel="🚀 Phân tích"
-              cancelLabel="Hủy"
-              emptyTemplate={
-                <div className="flex flex-col items-center justify-center text-gray-500 py-10 border-2 border-dashed border-slate-200 rounded-xl hover:border-blue-300 transition-colors">
-                  <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center mb-4">
-                    <i className="pi pi-cloud-upload text-2xl text-blue-500"></i>
-                  </div>
-                  <p className="text-slate-600 font-medium">
-                    Kéo & thả file vào đây
-                  </p>
-                  <p className="text-slate-400 text-sm mt-1">
-                    hoặc bấm <span className="text-blue-600 font-semibold">Chọn file</span> để tải lên
-                  </p>
-                </div>
-              }
-            />
-            <div className="text-slate-500 mt-2">{status}</div>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="mt-6 flex flex-wrap items-center gap-3">
-          <div className="inline-flex rounded-lg overflow-hidden border border-slate-200">
-            <button
-              onClick={() => setViewMode("upgraded")}
-              className={`px-3 py-2 text-sm ${viewMode === "upgraded" ? "bg-sky-600 text-white" : "bg-white text-slate-700"}`}
-              title="Hiển thị sau hậu xử lý (nâng cấp mức độ)"
-            >
-              Sau hậu xử lý
-            </button>
-            <button
-              onClick={() => setViewMode("raw")}
-              className={`px-3 py-2 text-sm ${viewMode === "raw" ? "bg-sky-600 text-white" : "bg-white text-slate-700"}`}
-              title="Kết quả phân tích AI gốc"
-            >
-              AI gốc
-            </button>
-            <button
-              onClick={() => setViewMode("anomalies")}
-              className={`px-3 py-2 text-sm ${viewMode === "anomalies" ? "bg-purple-600 text-white" : "bg-white text-slate-700"}`}
-              title="Phát hiện bất thường + AI phân tích"
-            >
-              🔍 Anomalies (4-step)
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2 ml-2">
-            {["CRITICAL", "WARNING", "INFO"].map((lv) => (
-              <label key={lv} className="flex items-center gap-1 text-sm text-slate-700">
-                <input type="checkbox" checked={selectedLevels.has(lv)} onChange={() => toggleLevel(lv)} />
-                <span>{lv}</span>
-                {activeSummary?.[lv] != null && <span className="text-slate-400">({activeSummary[lv]})</span>}
-              </label>
-            ))}
-          </div>
-
-          {/* Anomaly-specific filters */}
-          {viewMode === "anomalies" && anomalySubjects.length > 0 && (
-            <div className="flex items-center gap-2 ml-2">
-              <select
-                value={anomalyFilterType}
-                onChange={(e) => setAnomalyFilterType(e.target.value)}
-                className="px-2 py-1 border rounded text-sm bg-white"
-              >
-                <option value="">All Types</option>
-                {anomalySubjectTypes.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-              <select
-                value={anomalyFilterLevel}
-                onChange={(e) => setAnomalyFilterLevel(e.target.value)}
-                className="px-2 py-1 border rounded text-sm bg-white"
-              >
-                <option value="">All Risk Levels</option>
-                <option value="Thấp">Thấp (Low)</option>
-                <option value="Trung bình">Trung bình (Medium)</option>
-                <option value="Cao">Cao (High)</option>
-                <option value="Cực kỳ nguy cấp">Cực kỳ nguy cấp (Critical)</option>
-              </select>
-            </div>
-          )}
-
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Tìm theo tóm tắt / gợi ý…"
-            className="flex-1 min-w-[220px] px-3 py-2 border rounded-lg text-sm outline-none focus:ring-2 ring-sky-300"
-          />
-
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-slate-700">Từ</label>
-            <input type="datetime-local" value={fromTs} onChange={(e) => setFromTs(e.target.value)} className="px-2 py-1 border rounded" />
-            <label className="text-sm text-slate-700">Đến</label>
-            <input type="datetime-local" value={toTs} onChange={(e) => setToTs(e.target.value)} className="px-2 py-1 border rounded" />
-          </div>
-
-          <button onClick={resetFilters} className="px-3 py-2 text-sm rounded-lg border bg-white hover:bg-slate-50">
-            Xoá lọc
-          </button>
-
-          <button onClick={exportCSVClient} className="px-3 py-2 text-sm rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">
-            ⬇️ Export CSV (client)
-          </button>
-          <button onClick={exportCSVServer} className="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">
-            ⬇️ Export CSV (server)
+        {/* Baseline training trigger */}
+        <div className="mb-4 flex justify-center">
+          <button
+            className="px-4 py-2 rounded-lg bg-orange-500 text-white font-semibold shadow hover:bg-orange-600 transition-colors"
+            onClick={() => setShowBaselineTrain((v) => !v)}
+          >
+            {showBaselineTrain ? "Ẩn huấn luyện baseline" : "🧠 Huấn luyện baseline"}
           </button>
         </div>
 
-        {/* Banner chips */}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {providerChip}
-          {showingChip}
-          {timeRangeChip}
-          {stats?.alerts != null && (
-            <span className="px-2 py-1 rounded-lg bg-purple-50 text-purple-700 text-xs font-semibold">
-              Alerts (analyze): {stats.alerts}
-            </span>
-          )}
-        </div>
+        {showBaselineTrain && (
+          <div className="mb-6 border border-orange-100 bg-orange-50 rounded-2xl p-4 shadow-sm">
+            <div className="flex flex-col md:flex-row md:items-center gap-4">
+              <div className="flex flex-col gap-1 w-full md:w-64">
+                <label className="text-sm font-semibold text-slate-700">Chọn nhóm (group)</label>
+                <select
+                  value={baselineGroup}
+                  onChange={(e) => setBaselineGroup(e.target.value)}
+                  className="px-3 py-2 border rounded-lg text-sm bg-white shadow-sm"
+                >
+                  {BASELINE_GROUPS.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-        {/* Data quality */}
-        {validateReport && (
-          <div className="mt-4 border rounded-lg p-3 bg-slate-50">
-            <div className="flex items-center justify-between">
-              <div className="font-semibold text-slate-700">🩺 Data quality</div>
-              <div className={`text-xs px-2 py-0.5 rounded ${validateReport.ok ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-                {validateReport.ok ? "OK" : "Needs attention"}
+              <div className="flex-1">
+                <FileUpload
+                  name="baseline"
+                  accept=".log,.txt,.json,.csv,.ndjson"
+                  customUpload
+                  uploadHandler={baselineUploadHandler}
+                  mode="advanced"
+                  chooseLabel="Chọn log baseline"
+                  uploadLabel={isTrainingBaseline ? "Đang huấn luyện..." : "🚀 Huấn luyện"}
+                  cancelLabel="Hủy"
+                  disabled={isTrainingBaseline}
+                  emptyTemplate={
+                    <div className="flex flex-col items-center justify-center text-gray-600 py-8 border-2 border-dashed border-orange-200 rounded-xl bg-white/70">
+                      <div className="w-12 h-12 rounded-full bg-orange-100 flex items-center justify-center mb-3">
+                        <i className="pi pi-upload text-xl text-orange-500"></i>
+                      </div>
+                      <p className="font-medium">Tải log baseline (.log/.txt/.json/.csv)</p>
+                      <p className="text-xs text-slate-500 mt-1 text-center">
+                        Chọn nhóm trước, sau đó bấm &ldquo;Huấn luyện&rdquo; để gửi về API
+                      </p>
+                    </div>
+                  }
+                />
               </div>
             </div>
-            {!validateReport.ok && (
-              <ul className="list-disc ml-5 mt-2 text-sm text-amber-700">
-                {(validateReport.issues || []).map((it, idx) => <li key={idx}>{it}</li>)}
-              </ul>
-            )}
-            <div className="mt-2 text-xs text-slate-600">
-              Rows: {validateReport.info?.rows ?? "?"} · Columns: {Array.isArray(validateReport.info?.columns) ? validateReport.info.columns.length : "?"}
+            {baselineStatus && <div className="mt-2 text-sm text-slate-700">{baselineStatus}</div>}
+
+            <div className="mt-4 flex gap-2">
+              <button
+                className="px-3 py-2 rounded-lg bg-white text-slate-700 border border-orange-200 hover:bg-orange-100"
+                onClick={() => setShowBaselineTrain(false)}
+                disabled={isTrainingBaseline}
+              >
+                ⬅️ Trở về phân tích
+              </button>
             </div>
           </div>
         )}
 
-        {/* Bảng kết quả + Anomaly Results */}
-        <h2 className="text-xl font-semibold text-slate-800 mt-6">📑 Kết quả phân tích</h2>
+        {/* Upload */}
+        {!showBaselineTrain && (
+          <div className="flex justify-center">
+            <div className="w-full max-w-xl">
+              <FileUpload
+                name="file"
+                accept=".csv,.json,.ndjson,.txt,.log"
+                customUpload
+                uploadHandler={uploadHandler}
+                mode="advanced"
+                chooseLabel="Chọn file"
+                uploadLabel="🚀 Phân tích"
+                cancelLabel="Hủy"
+                emptyTemplate={
+                  <div className="flex flex-col items-center justify-center text-gray-500 py-10 border-2 border-dashed border-slate-200 rounded-xl hover:border-blue-300 transition-colors">
+                    <div className="w-14 h-14 rounded-full bg-blue-50 flex items-center justify-center mb-4">
+                      <i className="pi pi-cloud-upload text-2xl text-blue-500"></i>
+                    </div>
+                    <p className="text-slate-600 font-medium">
+                      Kéo & thả file vào đây
+                    </p>
+                    <p className="text-slate-400 text-sm mt-1">
+                      hoặc bấm <span className="text-blue-600 font-semibold">Chọn file</span> để tải lên
+                    </p>
+                  </div>
+                }
+              />
+              <div className="text-slate-500 mt-2">{status}</div>
+            </div>
+          </div>
+        )}
 
-        {/* ANOMALY DETECTION RESULTS (4-STEP) */}
-        {viewMode === "anomalies" ? (
-          (anomalyReport || anomalyAnalyzed) ? (
-            <div className="mt-4 space-y-4">
-              {/* Step 2: Raw Anomalies Summary */}
-              {anomalyReport && (
-                <div className="border rounded-lg p-4 bg-purple-50">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-lg font-semibold text-purple-900">📊 Phát hiện Bất thường (Raw Anomalies)</h3>
-                    <span className="px-3 py-1 rounded-lg bg-purple-100 text-purple-700 text-sm font-semibold">
-                      {anomalyReport.total_alerts} alerts
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
-                    <div className="bg-white p-3 rounded border-l-4 border-red-500">
-                      <div className="text-xs text-slate-600">CRITICAL</div>
-                      <div className="text-2xl font-bold text-red-600">{anomalyReport.severity_breakdown?.CRITICAL || 0}</div>
-                    </div>
-                    <div className="bg-white p-3 rounded border-l-4 border-orange-500">
-                      <div className="text-xs text-slate-600">WARNING</div>
-                      <div className="text-2xl font-bold text-orange-600">{anomalyReport.severity_breakdown?.WARNING || 0}</div>
-                    </div>
-                  </div>
+        {/* Controls + Results (ẩn khi đang huấn luyện baseline) */}
+        {!showBaselineTrain && (
+          <>
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              <div className="inline-flex rounded-lg overflow-hidden border border-slate-200">
+                <button
+                  onClick={() => setViewMode("upgraded")}
+                  className={`px-3 py-2 text-sm ${viewMode === "upgraded" ? "bg-sky-600 text-white" : "bg-white text-slate-700"}`}
+                  title="Hiển thị sau hậu xử lý (nâng cấp mức độ)"
+                >
+                  Sau hậu xử lý
+                </button>
+                <button
+                  onClick={() => setViewMode("raw")}
+                  className={`px-3 py-2 text-sm ${viewMode === "raw" ? "bg-sky-600 text-white" : "bg-white text-slate-700"}`}
+                  title="Kết quả phân tích AI gốc"
+                >
+                  AI gốc
+                </button>
+                <button
+                  onClick={() => setViewMode("anomalies")}
+                  className={`px-3 py-2 text-sm ${viewMode === "anomalies" ? "bg-purple-600 text-white" : "bg-white text-slate-700"}`}
+                  title="Phát hiện bất thường + AI phân tích"
+                >
+                  🔍 Anomalies (4-step)
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 ml-2">
+                {["CRITICAL", "WARNING", "INFO"].map((lv) => (
+                  <label key={lv} className="flex items-center gap-1 text-sm text-slate-700">
+                    <input type="checkbox" checked={selectedLevels.has(lv)} onChange={() => toggleLevel(lv)} />
+                    <span>{lv}</span>
+                    {activeSummary?.[lv] != null && <span className="text-slate-400">({activeSummary[lv]})</span>}
+                  </label>
+                ))}
+              </div>
+
+              {/* Anomaly-specific filters */}
+              {viewMode === "anomalies" && anomalySubjects.length > 0 && (
+                <div className="flex items-center gap-2 ml-2">
+                  <select
+                    value={anomalyFilterType}
+                    onChange={(e) => setAnomalyFilterType(e.target.value)}
+                    className="px-2 py-1 border rounded text-sm bg-white"
+                  >
+                    <option value="">All Types</option>
+                    {anomalySubjectTypes.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={anomalyFilterLevel}
+                    onChange={(e) => setAnomalyFilterLevel(e.target.value)}
+                    className="px-2 py-1 border rounded text-sm bg-white"
+                  >
+                    <option value="">All Risk Levels</option>
+                    <option value="Thấp">Thấp (Low)</option>
+                    <option value="Trung bình">Trung bình (Medium)</option>
+                    <option value="Cao">Cao (High)</option>
+                    <option value="Cực kỳ nguy cấp">Cực kỳ nguy cấp (Critical)</option>
+                  </select>
                 </div>
               )}
 
-              {/* Step 4: AI-Analyzed (grouped by subject) */}
-              {anomalySubjects.length > 0 && (
-                <div className="border rounded-lg p-4 bg-indigo-50">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-lg font-semibold text-indigo-900">🤖 Phân tích từ AI</h3>
-                    <span className="px-3 py-1 rounded-lg bg-indigo-100 text-indigo-700 text-sm font-semibold flex flex-col leading-tight">
-                      <span>{totalAnalyzedSubjects} subjects</span>
-                      {totalAnalyzedAlerts > 0 && (
-                        <span className="text-xs text-slate-600">{totalAnalyzedAlerts} alerts</span>
-                      )}
-                    </span>
-                  </div>
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Tìm theo tóm tắt / gợi ý…"
+                className="flex-1 min-w-[220px] px-3 py-2 border rounded-lg text-sm outline-none focus:ring-2 ring-sky-300"
+              />
 
-                  {/* Tóm tắt phân bố mức rủi ro */}
-                  {anomalySummary && (
-                    <div className="mb-3 p-3 bg-white rounded border-l-4 border-indigo-500">
-                      <div className="text-xs text-slate-600 mb-1">Risk Level Breakdown</div>
-                      <div className="flex gap-2 flex-wrap">
-                        {Object.entries(anomalySummary.by_risk_level || {}).map(([level, count]) => (
-                          <span key={level} className="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-sm">
-                            {level}: {count}
-                          </span>
-                        ))}
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-slate-700">Từ</label>
+                <input type="datetime-local" value={fromTs} onChange={(e) => setFromTs(e.target.value)} className="px-2 py-1 border rounded" />
+                <label className="text-sm text-slate-700">Đến</label>
+                <input type="datetime-local" value={toTs} onChange={(e) => setToTs(e.target.value)} className="px-2 py-1 border rounded" />
+              </div>
+
+              <button onClick={resetFilters} className="px-3 py-2 text-sm rounded-lg border bg-white hover:bg-slate-50">
+                Xoá lọc
+              </button>
+
+              <button onClick={exportCSVClient} className="px-3 py-2 text-sm rounded-lg bg-emerald-600 text-white hover:bg-emerald-700">
+                ⬇️ Export CSV (client)
+              </button>
+              <button onClick={exportCSVServer} className="px-3 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700">
+                ⬇️ Export CSV (server)
+              </button>
+            </div>
+
+            {/* Banner chips */}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {providerChip}
+              {showingChip}
+              {timeRangeChip}
+              {stats?.alerts != null && (
+                <span className="px-2 py-1 rounded-lg bg-purple-50 text-purple-700 text-xs font-semibold">
+                  Alerts (analyze): {stats.alerts}
+                </span>
+              )}
+            </div>
+
+            {/* Data quality */}
+            {validateReport && (
+              <div className="mt-4 border rounded-lg p-3 bg-slate-50">
+                <div className="flex items-center justify-between">
+                  <div className="font-semibold text-slate-700">🩺 Data quality</div>
+                  <div className={`text-xs px-2 py-0.5 rounded ${validateReport.ok ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                    {validateReport.ok ? "OK" : "Needs attention"}
+                  </div>
+                </div>
+                {!validateReport.ok && (
+                  <ul className="list-disc ml-5 mt-2 text-sm text-amber-700">
+                    {(validateReport.issues || []).map((it, idx) => <li key={idx}>{it}</li>)}
+                  </ul>
+                )}
+                <div className="mt-2 text-xs text-slate-600">
+                  Rows: {validateReport.info?.rows ?? "?"} · Columns: {Array.isArray(validateReport.info?.columns) ? validateReport.info.columns.length : "?"}
+                </div>
+              </div>
+            )}
+
+            {/* Bảng kết quả + Anomaly Results */}
+            <h2 className="text-xl font-semibold text-slate-800 mt-6">📑 Kết quả phân tích</h2>
+
+            {/* ANOMALY DETECTION RESULTS (4-STEP) */}
+            {viewMode === "anomalies" ? (
+              (anomalyReport || anomalyAnalyzed) ? (
+                <div className="mt-4 space-y-4">
+                  {/* Step 2: Raw Anomalies Summary */}
+                  {anomalyReport && (
+                    <div className="border rounded-lg p-4 bg-purple-50">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-lg font-semibold text-purple-900">📊 Phát hiện Bất thường (Raw Anomalies)</h3>
+                        <span className="px-3 py-1 rounded-lg bg-purple-100 text-purple-700 text-sm font-semibold">
+                          {anomalyReport.total_alerts} alerts
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                        <div className="bg-white p-3 rounded border-l-4 border-red-500">
+                          <div className="text-xs text-slate-600">CRITICAL</div>
+                          <div className="text-2xl font-bold text-red-600">{anomalyReport.severity_breakdown?.CRITICAL || 0}</div>
+                        </div>
+                        <div className="bg-white p-3 rounded border-l-4 border-orange-500">
+                          <div className="text-xs text-slate-600">WARNING</div>
+                          <div className="text-2xl font-bold text-orange-600">{anomalyReport.severity_breakdown?.WARNING || 0}</div>
+                        </div>
                       </div>
                     </div>
                   )}
 
-                  {/* Cards theo subject */}
-                  <div className="space-y-2">
-                    {(() => {
-                      const subjects = filteredAnomalySubjects;
-                      if (!subjects.length) {
-                        return <div className="text-slate-500 text-sm">Không có kết quả.</div>;
-                      }
+                  {/* Step 4: AI-Analyzed (grouped by subject) */}
+                  {anomalySubjects.length > 0 && (
+                    <div className="border rounded-lg p-4 bg-indigo-50">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-lg font-semibold text-indigo-900">🤖 Phân tích từ AI</h3>
+                        <span className="px-3 py-1 rounded-lg bg-indigo-100 text-indigo-700 text-sm font-semibold flex flex-col leading-tight">
+                          <span>{totalAnalyzedSubjects} subjects</span>
+                          {totalAnalyzedAlerts > 0 && (
+                            <span className="text-xs text-slate-600">{totalAnalyzedAlerts} alerts</span>
+                          )}
+                        </span>
+                      </div>
 
-                      return subjects.map((subject, idx) => {
-                        const severityClass =
-                          subject.severity === "CRITICAL" ? "text-red-600" :
-                            subject.severity === "WARNING" ? "text-orange-600" :
-                              subject.severity === "INFO" ? "text-yellow-600" :
-                                "text-slate-600";
+                      {/* Tóm tắt phân bố mức rủi ro */}
+                      {anomalySummary && (
+                        <div className="mb-3 p-3 bg-white rounded border-l-4 border-indigo-500">
+                          <div className="text-xs text-slate-600 mb-1">Risk Level Breakdown</div>
+                          <div className="flex gap-2 flex-wrap">
+                            {Object.entries(anomalySummary.by_risk_level || {}).map(([level, count]) => (
+                              <span key={level} className="px-2 py-1 bg-indigo-100 text-indigo-700 rounded text-sm">
+                                {level}: {count}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
-                        const alertTypesLabel = subject.alertTypes.length
-                          ? subject.alertTypes.join(", ")
-                          : "unknown";
+                      {/* Cards theo subject */}
+                      <div className="space-y-2">
+                        {(() => {
+                          const subjects = filteredAnomalySubjects;
+                          if (!subjects.length) {
+                            return <div className="text-slate-500 text-sm">Không có kết quả.</div>;
+                          }
 
-                        const sampleAlerts = subject.alerts.slice(0, 2);
+                          return subjects.map((subject, idx) => {
+                            const severityClass =
+                              subject.severity === "CRITICAL" ? "text-red-600" :
+                                subject.severity === "WARNING" ? "text-orange-600" :
+                                  subject.severity === "INFO" ? "text-yellow-600" :
+                                    "text-slate-600";
 
-                        return (
-                          <div key={`${subject.subject}-${idx}`} className="bg-white p-3 rounded border-l-4 border-indigo-400">
-                            <div className="flex items-start justify-between mb-2">
-                              <div>
-                                <div className="font-semibold text-slate-800 flex items-center gap-2">
-                                  {(subject.subject || "").toLowerCase() === "unknown" ? (
-                                    <>
-                                      <span className="text-2xl">🚨</span>
-                                      <span className="text-red-700">{subject.subject}</span>
-                                      <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-bold  rounded uppercase border border-red-300">
-                                        ⚠️ ROGUE DEVICE
-                                      </span>
-                                    </>
-                                  ) : (
-                                    subject.subject
-                                  )}
+                            const alertTypesLabel = subject.alertTypes.length
+                              ? subject.alertTypes.join(", ")
+                              : "unknown";
+
+                            const sampleAlerts = subject.alerts.slice(0, 2);
+
+                            return (
+                              <div key={`${subject.subject}-${idx}`} className="bg-white p-3 rounded border-l-4 border-indigo-400">
+                                <div className="flex items-start justify-between mb-2">
+                                  <div>
+                                    <div className="font-semibold text-slate-800 flex items-center gap-2">
+                                      {(subject.subject || "").toLowerCase() === "unknown" ? (
+                                        <>
+                                          <span className="text-2xl">🚨</span>
+                                          <span className="text-red-700">{subject.subject}</span>
+                                          <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-bold  rounded uppercase border border-red-300">
+                                            ⚠️ ROGUE DEVICE
+                                          </span>
+                                        </>
+                                      ) : (
+                                        subject.subject
+                                      )}
+                                    </div>
+                                    <div className="text-xs text-slate-600">
+                                      {alertTypesLabel} | {subject.alert_count} alerts
+                                    </div>
+                                  </div>
+                                  <div className={`px-2 py-1 rounded text-sm font-semibold ${riskLevelClass(subject.ai_analysis?.risk_level)}`}>
+                                    {subject.ai_analysis?.risk_level || "Unknown"}
+                                  </div>
                                 </div>
-                                <div className="text-xs text-slate-600">
-                                  {alertTypesLabel} | {subject.alert_count} alerts
-                                </div>
-                              </div>
-                              <div className={`px-2 py-1 rounded text-sm font-semibold ${riskLevelClass(subject.ai_analysis?.risk_level)}`}>
-                                {subject.ai_analysis?.risk_level || "Unknown"}
-                              </div>
-                            </div>
 
-                            <div className="bg-slate-50 p-3 rounded border-l-4 border-indigo-300 mb-3">
-                              <div className="text-xs text-slate-600 font-semibold mb-1">Sự kiện</div>
-                              <div className="text-sm text-slate-800 space-y-1">
-                                {sampleAlerts.length ? (
-                                  sampleAlerts.map((item, sampleIdx) => (
-                                    <div key={sampleIdx}>- {item.text || "Không có mô tả"}</div>
-                                  ))
-                                ) : (
-                                  <div>Không có mô tả</div>
-                                )}
-                                {subject.alert_count > sampleAlerts.length && (
-                                  <div className="text-xs text-slate-500">
-                                    +{subject.alert_count - sampleAlerts.length} alert khác...
+                                <div className="bg-slate-50 p-3 rounded border-l-4 border-indigo-300 mb-3">
+                                  <div className="text-xs text-slate-600 font-semibold mb-1">Sự kiện</div>
+                                  <div className="text-sm text-slate-800 space-y-1">
+                                    {sampleAlerts.length ? (
+                                      sampleAlerts.map((item, sampleIdx) => (
+                                        <div key={sampleIdx}>- {item.text || "Không có mô tả"}</div>
+                                      ))
+                                    ) : (
+                                      <div>Không có mô tả</div>
+                                    )}
+                                    {subject.alert_count > sampleAlerts.length && (
+                                      <div className="text-xs text-slate-500">
+                                        +{subject.alert_count - sampleAlerts.length} alert khác...
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="text-sm mb-2">
+                                  <strong>Tóm tắt phân tích:</strong>
+                                  <div className="text-slate-700 mt-1">{subject.ai_analysis?.summary}</div>
+                                </div>
+
+                                {subject.ai_analysis?.risks && subject.ai_analysis.risks.length > 0 && (
+                                  <div className="text-sm mb-2">
+                                    <strong>Rủi ro:</strong>
+                                    <ul className="list-disc ml-5 text-slate-700 mt-1">
+                                      {subject.ai_analysis.risks.map((risk, i) => (
+                                        <li key={i}>{risk}</li>
+                                      ))}
+                                    </ul>
                                   </div>
                                 )}
-                              </div>
-                            </div>
 
-                            <div className="text-sm mb-2">
-                              <strong>Tóm tắt phân tích:</strong>
-                              <div className="text-slate-700 mt-1">{subject.ai_analysis?.summary}</div>
-                            </div>
+                                {subject.ai_analysis?.actions && subject.ai_analysis.actions.length > 0 && (
+                                  <div className="text-sm">
+                                    <strong>Hành động đề xuất:</strong>
+                                    <ul className="list-disc ml-5 text-slate-700 mt-1">
+                                      {subject.ai_analysis.actions.map((action, i) => (
+                                        <li key={i}>{action}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
 
-                            {subject.ai_analysis?.risks && subject.ai_analysis.risks.length > 0 && (
-                              <div className="text-sm mb-2">
-                                <strong>Rủi ro:</strong>
-                                <ul className="list-disc ml-5 text-slate-700 mt-1">
-                                  {subject.ai_analysis.risks.map((risk, i) => (
-                                    <li key={i}>{risk}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-
-                            {subject.ai_analysis?.actions && subject.ai_analysis.actions.length > 0 && (
-                              <div className="text-sm">
-                                <strong>Hành động đề xuất:</strong>
-                                <ul className="list-disc ml-5 text-slate-700 mt-1">
-                                  {subject.ai_analysis.actions.map((action, i) => (
-                                    <li key={i}>{action}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-
-                            <div className="mt-3 pt-3 border-t border-slate-200 flex gap-4 justify-between">
-                              <div className="flex-1">
-                                <div className="text-xs text-slate-600 font-semibold">Score</div>
-                                <div className="text-lg font-bold text-indigo-600">
-                                  {typeof subject.score === "number" ? subject.score.toFixed(2) : "N/A"}
+                                <div className="mt-3 pt-3 border-t border-slate-200 flex gap-4 justify-between">
+                                  <div className="flex-1">
+                                    <div className="text-xs text-slate-600 font-semibold">Score</div>
+                                    <div className="text-lg font-bold text-indigo-600">
+                                      {typeof subject.score === "number" ? subject.score.toFixed(2) : "N/A"}
+                                    </div>
+                                  </div>
+                                  <div className="flex-1">
+                                    <div className="text-xs text-slate-600 font-semibold">Severity</div>
+                                    <div className={`text-lg font-bold ${severityClass}`}>
+                                      {subject.severity || "N/A"}
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
-                              <div className="flex-1">
-                                <div className="text-xs text-slate-600 font-semibold">Severity</div>
-                                <div className={`text-lg font-bold ${severityClass}`}>
-                                  {subject.severity || "N/A"}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      });
-                    })()}
-                  </div>
+                            );
+                          });
+                        })()}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          ) : (
-            <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
-              <p className="text-slate-500 text-sm">Chưa có dữ liệu.</p>
-            </div>
-          )
-        ) : (
-          <div className="overflow-x-auto mt-2">
-            <table className="min-w-full border-collapse">
-              <thead>
-                <tr className="bg-slate-50 text-slate-600">
-                  <th className="text-left py-2 px-3">#</th>
-                  <th className="text-left py-2 px-3">Count</th>
-                  <th className="text-left py-2 px-3">Level</th>
-                  <th className="text-left py-2 px-3">Tóm tắt</th>
-                  <th className="text-left py-2 px-3">Gợi ý</th>
-                  <th className="text-left py-2 px-3">Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeResults.length ? (
-                  activeResults.map((r, idx) => (
-                    <tr key={`${r.log_index}-${idx}`} className="border-b last:border-0 hover:bg-slate-50">
-                      <td className="py-2 px-3">{r.log_index ?? idx + 1}</td>
-                      <td className="py-2 px-3">{r.collapsed_count ?? 1}</td>
-                      <td className="py-2 px-3"><Badge level={r.level}>{r.level}</Badge></td>
-                      <td className="py-2 px-3">{r.summary}</td>
-                      <td className="py-2 px-3">{r.suggestion}</td>
-                      <td className="py-2 px-3">{r.upgrade_reason || ""}</td>
+              ) : (
+                <div className="mt-4 p-4 bg-slate-50 rounded-lg border border-slate-200">
+                  <p className="text-slate-500 text-sm">Chưa có dữ liệu.</p>
+                </div>
+              )
+            ) : (
+              <div className="overflow-x-auto mt-2">
+                <table className="min-w-full border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 text-slate-600">
+                      <th className="text-left py-2 px-3">#</th>
+                      <th className="text-left py-2 px-3">Count</th>
+                      <th className="text-left py-2 px-3">Level</th>
+                      <th className="text-left py-2 px-3">Tóm tắt</th>
+                      <th className="text-left py-2 px-3">Gợi ý</th>
+                      <th className="text-left py-2 px-3">Reason</th>
                     </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="py-3 px-3 text-slate-500" colSpan={6}>
-                      Chưa có dữ liệu.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody>
+                    {activeResults.length ? (
+                      activeResults.map((r, idx) => (
+                        <tr key={`${r.log_index}-${idx}`} className="border-b last:border-0 hover:bg-slate-50">
+                          <td className="py-2 px-3">{r.log_index ?? idx + 1}</td>
+                          <td className="py-2 px-3">{r.collapsed_count ?? 1}</td>
+                          <td className="py-2 px-3"><Badge level={r.level}>{r.level}</Badge></td>
+                          <td className="py-2 px-3">{r.summary}</td>
+                          <td className="py-2 px-3">{r.suggestion}</td>
+                          <td className="py-2 px-3">{r.upgrade_reason || ""}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td className="py-3 px-3 text-slate-500" colSpan={6}>
+                          Chưa có dữ liệu.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
