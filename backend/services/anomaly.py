@@ -3458,7 +3458,7 @@ def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
             ssh_logs = pd.concat([ssh_logs, program_ssh], ignore_index=True)
         
         # Fallback: Check message directly for SSH patterns
-        message_ssh = df[df["message"].astype(str).str.contains(r"(sshd|Accepted\s+(publickey|password)\s+for)", case=False, regex=True, na=False)].copy()
+        message_ssh = df[df["message"].astype(str).str.contains(r"(?:sshd|Accepted\s+(?:publickey|password)\s+for)", case=False, regex=True, na=False)].copy()
         ssh_logs = pd.concat([ssh_logs, message_ssh], ignore_index=True)
         
         # Remove duplicates
@@ -3472,7 +3472,7 @@ def _detect_ssh_login_burst(df: pd.DataFrame) -> List[Dict[str, Any]]:
         print(f"[DEBUG] SSH detection: Found {len(ssh_logs)} SSH log entries", file=sys.stderr)
         
         # Filter for successful logins (lateral movement indicator)
-        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted\s+(publickey|password)", case=False, regex=True, na=False)].copy()
+        successful_logins = ssh_logs[ssh_logs["message"].astype(str).str.contains(r"Accepted\s+(?:publickey|password)", case=False, regex=True, na=False)].copy()
         if len(successful_logins) == 0:
             print(f"[DEBUG] SSH detection: No 'Accepted publickey/password' found", file=sys.stderr)
             return alerts
@@ -5908,7 +5908,23 @@ def generate_raw_anomalies(df: pd.DataFrame, baselines_dir: str, log_type: str =
                             
                             # Use unified scoring system for severity mapping
                             if has_variance:
-                                raw_score = float(z)
+                                # NORMALIZE Z-score to 0-10 range to prevent extreme values (e.g., Z=152 → score=10)
+                                # Use logarithmic-inspired scaling for better distribution:
+                                # Z=3 → 6.0 (WARNING threshold)
+                                # Z=5 → 7.0 (CRITICAL threshold)
+                                # Z=10 → 8.5
+                                # Z=50+ → 10.0 (capped)
+                                if z <= 3:
+                                    # Linear scaling for low Z-scores (preserve sensitivity)
+                                    raw_score = z * 2.0  # Z=3 → 6.0
+                                elif z <= 10:
+                                    # Moderate scaling for medium Z-scores
+                                    raw_score = 6.0 + (z - 3) * 0.357  # Z=10 → 8.5
+                                else:
+                                    # Logarithmic scaling for high Z-scores (prevent explosion)
+                                    # Z=20 → 9.2, Z=50 → 9.7, Z=100+ → 10.0
+                                    import math
+                                    raw_score = min(8.5 + math.log10(z - 9) * 0.75, 10.0)
                             else:
                                 # If no variance, use ratio-based score
                                 ratio = (cur / (mu or 1)) if (mu or 0) > 0 else 1

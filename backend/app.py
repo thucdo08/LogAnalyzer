@@ -741,6 +741,9 @@ Trả lời CHÍNH XÁC theo format JSON này (không thêm bất cứ thứ gì
                     "sensitive_db_access_detected",  # Database data export, PII queries - Tier 1 priority
                     "service_manipulation_detected",  # Stopping auditd/firewall (Defense Evasion), critical services - Tier 1 priority
                     "credential_bruteforce_detected",  # SSH brute force with high failure rate - Tier 1 priority
+                    # Linux/SSH attacks - Tier 1 priority
+                    "ssh_lateral_movement",  # SSH logins from 20+ different IPs - compromised credentials indicator
+                    "cron_job_overlap",  # Malicious backdoor execution via cron (Defense Evasion) - Tier 1 priority
                     # Firewall attacks - Tier 1 priority (added to prevent false capping)
                     "firewall_deny_burst",  # DENY burst attacks (DoS, coordinated attacks)
                     "firewall_port_scan",  # Port scanning attempts
