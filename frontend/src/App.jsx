@@ -7,7 +7,7 @@ import "./App.css";
 
 //const API_BASE = "https://api.thuandoandevops.site";
 // nếu muốn test localhost thì thay API_BASE
-const API_BASE = "http://localhost:8000";
+const API_BASE = "http://54.254.11.86:8000";
 const BASELINE_GROUPS = ["engineering", "finance", "sales", "itadmin"];
 
 const SEVERITY_PRIORITY = {
