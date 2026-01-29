@@ -151,6 +151,23 @@ LogAnalyze/
 │   ├── nginx.conf              # Nginx configuration
 │   ├── eslint.config.js        # ESLint configuration
 │   └── public/
+├── LogAnalyzer-Infrastructure/  # AWS IaC deployment
+│   ├── terraform/               # Terraform configurations
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── vpc.tf
+│   │   ├── security-groups.tf
+│   │   ├── ec2.tf
+│   │   └── outputs.tf
+│   ├── scripts/                 # Deployment scripts
+│   │   ├── install-docker.sh
+│   │   ├── install-jenkins.sh
+│   │   └── configure-nginx.sh
+│   ├── docs/                    # Deployment documentation
+│   │   ├── AWS_Deployment_Plan.md
+│   │   ├── Step_by_Step_Guide.md
+│   │   └── AWS_Cleanup_Guide.md
+│   └── README.md
 ├── docker-compose.yml          # Docker Compose configuration
 ├── Jenkinsfile                 # CI/CD pipeline
 └── README.md                   # This file
@@ -211,7 +228,7 @@ LogAnalyze/
 - React 19, Vite, PrimeReact, Tailwind CSS, ESLint
 
 **Infrastructure:**
-- Docker, Docker Compose, Jenkins, Nginx
+- Docker, Docker Compose, Jenkins, Nginx, Terraform, AWS
 
 ## Contributing
 
@@ -234,7 +251,7 @@ For additional help and documentation:
 
 This project includes complete AWS deployment using Infrastructure as Code (Terraform) with automated CI/CD pipeline.
 
-###  Infrastructure Overview
+### 🏗️ Infrastructure Overview
 
 **Deployed Resources:**
 - **VPC**: Custom VPC (10.0.0.0/16) with public subnet
@@ -248,7 +265,7 @@ This project includes complete AWS deployment using Infrastructure as Code (Terr
 
 **Monthly Cost**: ~$57 (when running)
 
-###  Quick Deployment
+### 🚀 Quick Deployment
 
 ```bash
 # 1. Configure AWS credentials
@@ -267,26 +284,26 @@ terraform apply
 # See: LogAnalyzer-Infrastructure/docs/Step_by_Step_Guide.md
 ```
 
-###  CI/CD Pipeline
+### 🔄 CI/CD Pipeline
 
 Automated deployment pipeline using Jenkins:
 
-1. **Code Push**  GitHub (main branch)
-2. **Webhook Trigger**  Jenkins auto-build
-3. **Build Images**  Docker (frontend + backend)
-4. **Push to Registry**  Docker Hub
-5. **Deploy**  SSH to App Server
-6. **Start Containers**  docker-compose up -d
-7. **Health Check**  Verify deployment
+1. **Code Push** → GitHub (main branch)
+2. **Webhook Trigger** → Jenkins auto-build
+3. **Build Images** → Docker (frontend + backend)
+4. **Push to Registry** → Docker Hub
+5. **Deploy** → SSH to App Server
+6. **Start Containers** → docker-compose up -d
+7. **Health Check** → Verify deployment
 
 **Pipeline Configuration**: [`Jenkinsfile`](Jenkinsfile)
 
-###  Published Docker Images
+### 📦 Published Docker Images
 
 - **Backend**: [dhuuthuc/loganalyze-backend:latest](https://hub.docker.com/r/dhuuthuc/loganalyze-backend)
 - **Frontend**: [dhuuthuc/loganalyze-frontend:latest](https://hub.docker.com/r/dhuuthuc/loganalyze-frontend)
 
-###  Infrastructure Documentation
+### 📚 Infrastructure Documentation
 
 Comprehensive guides available in [`LogAnalyzer-Infrastructure/docs/`](LogAnalyzer-Infrastructure/docs/):
 
@@ -294,41 +311,36 @@ Comprehensive guides available in [`LogAnalyzer-Infrastructure/docs/`](LogAnalyz
 - **[Step-by-Step Guide](LogAnalyzer-Infrastructure/docs/Step_by_Step_Guide.md)** - Detailed deployment instructions (all 6 phases)
 - **[AWS Cleanup Guide](LogAnalyzer-Infrastructure/docs/AWS_Cleanup_Guide.md)** - Resource deletion and cost management
 
-###  Infrastructure Diagram
+### 🏛️ Infrastructure Diagram
 
 ```
-
-              AWS Cloud (ap-southeast-1)                 
-    
-             VPC: 10.0.0.0/16                          
-        
-          Public Subnet: 10.0.1.0/24                 
-                                                     
-                 
-        Jenkins          App Server             
-        Server     SSH   + Nginx                
-        (t3.small)   + Docker               
-                           - Frontend           
-        CI/CD              - Backend            
-                 
-                                                  
-        Elastic IP           Elastic IP             
-        (x.x.x.207)          (x.x.x.86)            
-        
-                                                    
-        Security Groups      Security Groups          
-        (SSH, 8080)         (SSH, HTTP, HTTPS)        
-    
-                                                      
-         Internet Gateway                              
-
-                                     
-                                     
+                    AWS Cloud (ap-southeast-1)
+    ┌───────────────────────────────────────────────────┐
+    │                VPC: 10.0.0.0/16                   │
+    │  ┌─────────────────────────────────────────────┐  │
+    │  │      Public Subnet: 10.0.1.0/24             │  │
+    │  │                                             │  │
+    │  │  ┌─────────────┐    ┌──────────────────┐   │  │
+    │  │  │  Jenkins    │    │  App Server      │   │  │
+    │  │  │  Server     │SSH │  + Nginx         │   │  │
+    │  │  │  (t3.small) │───►│  + Docker        │   │  │
+    │  │  │             │    │    - Frontend    │   │  │
+    │  │  │  CI/CD      │    │    - Backend     │   │  │
+    │  │  └─────────────┘    └──────────────────┘   │  │
+    │  │         │                     │            │  │
+    │  │    Elastic IP           Elastic IP         │  │
+    │  └─────────┼─────────────────────┼────────────┘  │
+    │            │                     │               │
+    │      Security Groups      Security Groups        │
+    │      (SSH, 8080)         (SSH, HTTP, HTTPS)      │
+    └────────────┼─────────────────────┼───────────────┘
+                 │                     │
+                 ▼                     ▼
           Jenkins Admin          End Users
         (Pipeline Mgmt)      (Web Application)
 ```
 
-###  Resource Cleanup
+### 🗑️ Resource Cleanup
 
 To destroy all AWS resources and stop charges:
 
@@ -340,4 +352,3 @@ terraform destroy
 **Savings**: ~$57/month
 
 > **Note**: Production deployment was taken offline after demonstration to minimize costs. All infrastructure code, Docker images, and documentation are preserved for redeployment.
-
