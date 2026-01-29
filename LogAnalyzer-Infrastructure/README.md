@@ -94,8 +94,17 @@ terraform destroy
 
 ## 📚 Documentation
 
-- [AWS Deployment Plan](../aws_deployment_plan.md)
-- [Step by Step Guide](../step_by_step_guide.md)
+Comprehensive guides for deployment and management:
+
+- **[AWS Deployment Plan](docs/AWS_Deployment_Plan.md)** - Complete deployment strategy and architecture
+- **[Step-by-Step Guide](docs/Step_by_Step_Guide.md)** - Detailed instructions for each deployment phase
+- **[AWS Cleanup Guide](docs/AWS_Cleanup_Guide.md)** - Instructions to delete resources and avoid charges
+
+### Quick Links
+
+- Infrastructure Code: [`terraform/`](terraform/)
+- Deployment Scripts: [`scripts/`](scripts/)
+- Main Project: [../](../)
 
 ## 🏗️ Infrastructure Diagram
 
