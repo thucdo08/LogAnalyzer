@@ -1,336 +1,343 @@
-# LogAnalyzer - AI-Powered Security Log Analysis Platform
+# LogAnalyze
 
-[![Production](https://img.shields.io/badge/Production-Offline-red)](https://github.com/thucdo08/LogAnalyzer)
-[![AWS](https://img.shields.io/badge/AWS-Deployed-orange)](https://github.com/thucdo08/LogAnalyzer/tree/main/LogAnalyzer-Infrastructure)
-[![Docker](https://img.shields.io/badge/Docker-Published-blue)](https://hub.docker.com/u/dhuuthuc)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+## Overview
 
-An enterprise-grade security log analysis platform leveraging AI (OpenAI GPT-4) to detect anomalies, analyze patterns, and provide actionable insights from security logs. Deployed on AWS with full CI/CD automation.
+Fullstack application which allows you to analyze logs and detect security anomalies using AI-powered threat detection. The platform ingests logs from multiple sources, automatically identifies suspicious patterns through baseline comparison, and provides detailed AI-driven risk assessment.
 
-> **Note**: Production deployment (https://dofuta.site) was taken offline after project demonstration to minimize costs. All infrastructure code and deployment configurations are preserved in this repository.
+## Prerequisites
+
+You will need the following things properly installed on your computer.
+
+- Node.js 18+
+- Python 3.11+
+- MongoDB Atlas or MongoDB 5+
+
+Additionally, based on the backend and frontend implementations, you may need to install additional software.
+
+## Database Setup
+
+Locate the MongoDB connection and ensure you have a MongoDB instance running. For cloud setup, use MongoDB Atlas at https://www.mongodb.com/cloud/atlas
+
+The database schema is automatically created when baselines are trained via the `/baseline/train` endpoint. No manual schema setup is required.
+
+## Backend Setup
+
+The backend is a Flask-based REST API that handles log processing, anomaly detection, and AI analysis.
+
+**Installation:**
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# or
+source .venv/bin/activate  # Linux/Mac
+pip install -r requirements.txt
+```
+
+**Starting the Backend:**
+
+```bash
+python app.py
+```
+
+or using Uvicorn:
+
+```bash
+uvicorn app:app --reload --port 8000
+```
+
+Backend will be available at: `http://localhost:8000`
+
+**Health Check:** `http://localhost:8000/health`
+
+## Frontend Setup
+
+The frontend is a React application built with Vite that provides a web interface for uploading logs, viewing analysis results, and managing baselines.
+
+**Installation:**
+
+```bash
+cd frontend
+npm install
+```
+
+**Starting the Frontend (Development):**
+
+```bash
+npm run dev
+```
+
+Frontend will be available at: `http://localhost:5173`
+
+**Building for Production:**
+
+```bash
+npm run build
+```
+
+## Running Backend and Frontend
+
+(1) Follow instructions for setting up the backend implementation and starting it:
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate  # Windows or: source .venv/bin/activate  # Linux/Mac
+pip install -r requirements.txt
+python app.py
+```
+
+Backend will be available at: `http://localhost:8000`
+
+(2) Follow instructions for setting up the frontend implementation and starting it (open a new terminal):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend will be available at: `http://localhost:5173`
+
+(3) Alternatively, follow instructions for starting up Docker containers using Docker Compose:
+
+```bash
+docker-compose up -d
+```
+
+- Frontend: http://localhost
+- Backend API: http://localhost:8000
+
+(4) Once the backend and frontend are running, open your browser and goto: `http://localhost:5173`
+
+## Project Structure
+
+```
+LogAnalyze/
+├── backend/                      # Flask REST API
+│   ├── app.py                   # Main application
+│   ├── requirements.txt         # Python dependencies
+│   ├── Dockerfile              # Docker configuration
+│   ├── config/                  # Configuration files
+│   │   ├── rules.json
+│   │   ├── scoring.json
+│   │   └── baselines/
+│   ├── services/                # Business logic
+│   │   ├── analyzer.py
+│   │   ├── anomaly.py
+│   │   ├── baseline.py
+│   │   ├── preprocess.py
+│   │   ├── postprocess.py
+│   │   ├── database.py
+│   │   ├── alert.py
+│   │   ├── enrich.py
+│   │   ├── filters.py
+│   │   ├── scoring.py
+│   │   └── validator.py
+│   └── utils/                   # Utility modules
+│       ├── file_handler.py
+│       └── syslog_parser.py
+├── frontend/                     # React web application
+│   ├── src/
+│   │   ├── App.jsx             # Main component
+│   │   ├── App.css             # Styles
+│   │   ├── index.css           # Global styles
+│   │   ├── main.jsx            # Entry point
+│   │   └── assets/
+│   ├── package.json            # JavaScript dependencies
+│   ├── vite.config.js          # Vite configuration
+│   ├── Dockerfile              # Docker configuration
+│   ├── nginx.conf              # Nginx configuration
+│   ├── eslint.config.js        # ESLint configuration
+│   └── public/
+├── docker-compose.yml          # Docker Compose configuration
+├── Jenkinsfile                 # CI/CD pipeline
+└── README.md                   # This file
+```
+
+## Key Features
+
+- **Multi-Format Log Support**: Parse logs from Linux syslog, Windows Event Logs, firewalls, routers, DNS, Apache, and more
+- **Baseline-Driven Anomaly Detection**: Automatic detection based on historical baseline models
+- **AI-Powered Analysis**: GPT-4 powered threat assessment and risk analysis
+- **Group-Based Baseline**: Support for departmental/team-level analysis
+- **Real-Time Alerting**: Notifications via N8N, Telegram, and Zalo
+- **MongoDB Integration**: Persistent storage of baselines and analysis results
+- **Docker Support**: Complete containerization for easy deployment
+
+## Supported Log Types
+
+- apache
+- dhcp
+- dns
+- edr
+- firewall
+- linuxsyslog
+- router
+- windows_eventlog
+
+
+## API Endpoints
+
+**Analysis:**
+- `POST /analyze` - Complete pipeline analysis
+- `POST /anomaly/raw` - Generate raw anomaly alerts
+- `POST /anomaly/prompt` - AI analysis of alerts
+- `POST /anomaly/batch-analyze` - Batch process alerts
+
+**Baseline Management:**
+- `POST /baseline/train` - Train baseline models
+- `GET /baseline/status` - Check baseline status
+- `GET /baseline/members` - View group memberships
+
+**Health & Status:**
+- `GET /health` - Health check
+- `GET /ai/status` - Check AI API status
+- `GET /api/health/mongodb` - Check MongoDB connection
+
+**Alerting:**
+- `POST /send-analysis-alerts` - Send analyzed alerts
+- `POST /send-raw-anomalies` - Send raw anomaly alerts
+- `POST /send-telegram` - Send Telegram notification
+- `POST /send-zalo` - Send Zalo notification
+
+## Tech Stack
+
+**Backend:**
+- Flask, Pandas, NumPy, MongoDB, OpenAI API, scikit-learn, Uvicorn
+
+**Frontend:**
+- React 19, Vite, PrimeReact, Tailwind CSS, ESLint
+
+**Infrastructure:**
+- Docker, Docker Compose, Jenkins, Nginx
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Commit and push
+5. Create a Pull Request
+
+## Support
+
+For additional help and documentation:
+- Review the API endpoint specifications in Backend Setup
+- Check configuration options in the Project Structure section
+- Review Dockerfile for containerization details
 
 ---
 
-## 🎯 Project Overview
+## AWS Infrastructure as Code Deployment
 
-LogAnalyzer is a full-stack web application that processes and analyzes security logs from various sources (firewalls, EDR systems, Windows event logs, SSH logs) using advanced AI algorithms to:
+This project includes complete AWS deployment using Infrastructure as Code (Terraform) with automated CI/CD pipeline.
 
-- **Detect Security Anomalies**: Identify suspicious activities, brute force attempts, privilege escalation, and more
-- **Correlate Events**: Cross-reference logs across different systems for comprehensive threat detection
-- **Risk Assessment**: Assign severity levels and risk scores to detected events
-- **AI-Powered Analysis**: Leverage OpenAI GPT-4 for intelligent log interpretation and recommendations
+###  Infrastructure Overview
 
-### Key Features
+**Deployed Resources:**
+- **VPC**: Custom VPC (10.0.0.0/16) with public subnet
+- **EC2 Instances**: 
+  - Application Server (t3.medium) - Hosts Docker containers
+  - Jenkins Server (t3.small) - CI/CD automation
+- **Security Groups**: Firewall rules for app and Jenkins servers
+- **Elastic IPs**: Static IP addresses for both servers
+- **Nginx**: Reverse proxy with SSL/TLS support
+- **Let's Encrypt**: Automated SSL certificate management
 
-- 🤖 **AI-Driven Analysis**: OpenAI GPT-4 integration for intelligent threat detection
-- 🔍 **Multi-Source Log Processing**: Support for firewall, EDR, Windows, SSH logs
-- 📊 **Real-Time Anomaly Detection**: Custom algorithms for pattern recognition
-- 🎯 **Risk Scoring**: Automated severity assignment (CRITICAL, WARNING, INFO)
-- 🌐 **Web-Based UI**: React SPA with intuitive log upload and visualization
-- 🐳 **Containerized**: Docker-ready for consistent deployment
-- 🚀 **CI/CD Pipeline**: Automated build and deployment with Jenkins
-- ☁️ **Cloud-Native**: Deployed on AWS with Infrastructure as Code (Terraform)
+**Monthly Cost**: ~$57 (when running)
 
----
-
-## 🏗️ Architecture
-
-### Application Stack
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Client Browser                         │
-│                     (React SPA)                             │
-└────────────────────────┬────────────────────────────────────┘
-                         │ HTTPS
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  Nginx Reverse Proxy                        │
-│              (SSL Termination, Routing)                     │
-└─────────────┬─────────────────────────┬─────────────────────┘
-              │                         │
-      ┌───────▼──────┐          ┌──────▼──────┐
-      │   Frontend   │          │   Backend   │
-      │   (React)    │          │   (Flask)   │
-      │   Port 3000  │          │   Port 8000 │
-      └──────────────┘          └──────┬──────┘
-                                       │
-                         ┌─────────────┼─────────────┐
-                         │                           │
-                    ┌────▼────┐              ┌──────▼──────┐
-                    │ OpenAI  │              │  MongoDB    │
-                    │ GPT-4   │              │  Atlas      │
-                    └─────────┘              └─────────────┘
-```
-
-### AWS Infrastructure
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    AWS VPC (10.0.0.0/16)                     │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │           Public Subnet (10.0.1.0/24)                  │  │
-│  │                                                        │  │
-│  │  ┌─────────────────┐      ┌────────────────────┐     │  │
-│  │  │ Jenkins Server  │      │   App Server       │     │  │
-│  │  │   t3.small      │      │   t3.medium        │     │  │
-│  │  │ CI/CD Pipeline  │─SSH─→│  Docker + Nginx    │     │  │
-│  │  └─────────────────┘      └────────────────────┘     │  │
-│  │         │                          │                  │  │
-│  │   EIP: x.x.x.207            EIP: x.x.x.86           │  │
-│  └────────┼──────────────────────────┼──────────────────┘  │
-│           │                          │                     │
-│     Security Groups          Security Groups               │
-│     (SSH, 8080)             (SSH, HTTP, HTTPS)             │
-└───────────┼──────────────────────────┼─────────────────────┘
-            │                          │
-            ▼                          ▼
-        Jenkins UI               Production App
-      (CI/CD Admin)              (End Users)
-```
-
----
-
-## 💻 Technology Stack
-
-### Frontend
-- **Framework**: React 18
-- **Build Tool**: Vite
-- **HTTP Client**: Axios
-- **Styling**: CSS3
-
-### Backend
-- **Framework**: Flask (Python 3.10)
-- **AI Integration**: OpenAI API (GPT-4)
-- **Database**: MongoDB Atlas
-- **Data Processing**: Pandas, NumPy
-- **CORS**: Flask-CORS
-
-### DevOps & Infrastructure
-- **Cloud Provider**: AWS (EC2, VPC, Security Groups, Elastic IPs)
-- **Infrastructure as Code**: Terraform
-- **CI/CD**: Jenkins with GitHub webhooks
-- **Containerization**: Docker & Docker Compose
-- **Container Registry**: Docker Hub
-- **Reverse Proxy**: Nginx
-- **SSL/TLS**: Let's Encrypt (Certbot)
-- **Version Control**: Git & GitHub
-
-### Security
-- HTTPS with Let's Encrypt SSL
-- VPC isolation with security groups
-- SSH key-based authentication
-- Secrets management via Jenkins credentials
-- Environment variable configuration
-
----
-
-## 🚀 Deployment
-
-### AWS Production Deployment
-
-This project includes complete Infrastructure as Code (IaC) for AWS deployment.
-
-**Infrastructure Repository**: [`LogAnalyzer-Infrastructure/`](LogAnalyzer-Infrastructure/)
-
-#### Quick Start
+###  Quick Deployment
 
 ```bash
 # 1. Configure AWS credentials
 aws configure
 
-# 2. Deploy infrastructure
+# 2. Navigate to infrastructure directory
 cd LogAnalyzer-Infrastructure/terraform
+
+# 3. Initialize Terraform
 terraform init
+
+# 4. Deploy infrastructure
 terraform apply
 
-# 3. Follow setup guides
+# 5. Follow post-deployment setup
 # See: LogAnalyzer-Infrastructure/docs/Step_by_Step_Guide.md
 ```
 
-#### Deployed Resources
-- 2× EC2 instances (App Server: t3.medium, Jenkins Server: t3.small)
-- Custom VPC with public subnet
-- 2× Elastic IPs (static IP addresses)
-- Security Groups (firewall rules)
-- Internet Gateway and Route Tables
+###  CI/CD Pipeline
 
-**Monthly Cost**: ~$57 (when running)
+Automated deployment pipeline using Jenkins:
 
-### CI/CD Pipeline
-
-Automated deployment via Jenkins:
-
-1. **Code Push** → GitHub (main branch)
-2. **Webhook Trigger** → Jenkins auto-build
-3. **Build Docker Images** → Frontend & Backend
-4. **Push to Registry** → Docker Hub
-5. **SSH Deploy** → App Server
-6. **Health Check** → Verification
+1. **Code Push**  GitHub (main branch)
+2. **Webhook Trigger**  Jenkins auto-build
+3. **Build Images**  Docker (frontend + backend)
+4. **Push to Registry**  Docker Hub
+5. **Deploy**  SSH to App Server
+6. **Start Containers**  docker-compose up -d
+7. **Health Check**  Verify deployment
 
 **Pipeline Configuration**: [`Jenkinsfile`](Jenkinsfile)
 
----
+###  Published Docker Images
 
-## 📦 Docker Images
+- **Backend**: [dhuuthuc/loganalyze-backend:latest](https://hub.docker.com/r/dhuuthuc/loganalyze-backend)
+- **Frontend**: [dhuuthuc/loganalyze-frontend:latest](https://hub.docker.com/r/dhuuthuc/loganalyze-frontend)
 
-Published on Docker Hub:
+###  Infrastructure Documentation
 
-- **Backend**: [`dhuuthuc/loganalyze-backend:latest`](https://hub.docker.com/r/dhuuthuc/loganalyze-backend)
-- **Frontend**: [`dhuuthuc/loganalyze-frontend:latest`](https://hub.docker.com/r/dhuuthuc/loganalyze-frontend)
+Comprehensive guides available in [`LogAnalyzer-Infrastructure/docs/`](LogAnalyzer-Infrastructure/docs/):
 
-### Run Locally with Docker
+- **[AWS Deployment Plan](LogAnalyzer-Infrastructure/docs/AWS_Deployment_Plan.md)** - Complete deployment strategy
+- **[Step-by-Step Guide](LogAnalyzer-Infrastructure/docs/Step_by_Step_Guide.md)** - Detailed deployment instructions (all 6 phases)
+- **[AWS Cleanup Guide](LogAnalyzer-Infrastructure/docs/AWS_Cleanup_Guide.md)** - Resource deletion and cost management
 
-```bash
-# Clone repository
-git clone https://github.com/thucdo08/LogAnalyzer.git
-cd LogAnalyzer
+###  Infrastructure Diagram
 
-# Create .env file
-cat > .env << EOF
-OPENAI_API_KEY=your_openai_key
-MONGODB_URI=your_mongodb_uri
-MONGODB_DB_NAME=loganalyzer
-EOF
-
-# Start with Docker Compose
-docker-compose up -d
-
-# Access application
-# Frontend: http://localhost:3000
-# Backend API: http://localhost:8000
 ```
 
----
+              AWS Cloud (ap-southeast-1)                 
+    
+             VPC: 10.0.0.0/16                          
+        
+          Public Subnet: 10.0.1.0/24                 
+                                                     
+                 
+        Jenkins          App Server             
+        Server     SSH   + Nginx                
+        (t3.small)   + Docker               
+                           - Frontend           
+        CI/CD              - Backend            
+                 
+                                                  
+        Elastic IP           Elastic IP             
+        (x.x.x.207)          (x.x.x.86)            
+        
+                                                    
+        Security Groups      Security Groups          
+        (SSH, 8080)         (SSH, HTTP, HTTPS)        
+    
+                                                      
+         Internet Gateway                              
 
-## 🛠️ Local Development
-
-### Prerequisites
-
-- Python 3.10+
-- Node.js 18+
-- MongoDB (local or Atlas)
-- OpenAI API Key
-
-### Backend Setup
-
-```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your credentials
-
-# Run development server
-python app.py
+                                     
+                                     
+          Jenkins Admin          End Users
+        (Pipeline Mgmt)      (Web Application)
 ```
 
-Backend runs on: http://localhost:8000
+###  Resource Cleanup
 
-### Frontend Setup
+To destroy all AWS resources and stop charges:
 
 ```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Configure API endpoint
-# Edit src/App.jsx if needed (default: http://localhost:8000)
-
-# Run development server
-npm run dev
+cd LogAnalyzer-Infrastructure/terraform
+terraform destroy
 ```
 
-Frontend runs on: http://localhost:3000
+**Savings**: ~$57/month
 
----
+> **Note**: Production deployment was taken offline after demonstration to minimize costs. All infrastructure code, Docker images, and documentation are preserved for redeployment.
 
-## 📚 Documentation
-
-### Deployment Guides
-- **[AWS Deployment Plan](LogAnalyzer-Infrastructure/docs/AWS_Deployment_Plan.md)** - Complete strategy and architecture
-- **[Step-by-Step Guide](LogAnalyzer-Infrastructure/docs/Step_by_Step_Guide.md)** - Detailed deployment instructions
-- **[Cleanup Guide](LogAnalyzer-Infrastructure/docs/AWS_Cleanup_Guide.md)** - Resource deletion and cost management
-
-### Infrastructure Code
-- **[Terraform Configurations](LogAnalyzer-Infrastructure/terraform/)** - IaC for AWS resources
-- **[Deployment Scripts](LogAnalyzer-Infrastructure/scripts/)** - Server setup automation
-- **[Jenkinsfile](Jenkinsfile)** - CI/CD pipeline definition
-
----
-
-## 📊 Project Metrics
-
-| Metric | Value |
-|--------|-------|
-| **Infrastructure Resources** | 11 AWS resources (Terraform-managed) |
-| **CI/CD Automation** | 100% (GitHub → Jenkins → Production) |
-| **Deployment Time** | ~5 minutes (automated) |
-| **Docker Images** | 2 published to Docker Hub |
-| **SSL Rating** | A+ (Let's Encrypt) |
-| **Lines of Code** | ~3,500+ (Frontend + Backend) |
-
----
-
-## 🎓 Skills Demonstrated
-
-This project showcases:
-
-✅ **Cloud Infrastructure**: AWS VPC, EC2, Security Groups, Elastic IPs  
-✅ **Infrastructure as Code**: Terraform for AWS provisioning  
-✅ **CI/CD Pipeline**: Jenkins automation with GitHub webhooks  
-✅ **Containerization**: Docker & Docker Compose orchestration  
-✅ **Web Development**: React SPA + Flask REST API  
-✅ **AI Integration**: OpenAI GPT-4 API for log analysis  
-✅ **Security**: SSL/TLS, VPC isolation, credential management  
-✅ **DevOps Practices**: Automated deployment, zero-downtime updates  
-✅ **System Administration**: Nginx configuration, Linux server management  
-✅ **Problem Solving**: Debugging deployment issues, performance optimization  
-
----
-
-## 🔗 Links
-
-- **GitHub Repository**: [thucdo08/LogAnalyzer](https://github.com/thucdo08/LogAnalyzer)
-- **Docker Hub**: [dhuuthuc](https://hub.docker.com/u/dhuuthuc)
-- **Infrastructure Code**: [LogAnalyzer-Infrastructure/](LogAnalyzer-Infrastructure/)
-- **Production Demo**: ~~https://dofuta.site~~ (Offline - AWS resources terminated to minimize costs)
-
----
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 👤 Author
-
-**Thuc Do Huu**  
-DevOps Engineer | Cloud Infrastructure Specialist
-
-- GitHub: [@thucdo08](https://github.com/thucdo08)
-- Docker Hub: [dhuuthuc](https://hub.docker.com/u/dhuuthuc)
-
----
-
-## 🙏 Acknowledgments
-
-- OpenAI GPT-4 for AI-powered log analysis
-- MongoDB Atlas for cloud database hosting
-- Let's Encrypt for free SSL certificates
-- Docker & Jenkins communities for excellent documentation
-
----
-
-**Status**: ✅ Project Complete | 🚀 Production-Ready | 💰 AWS Resources Offline
-
-**Note for Recruiters**: While the live production deployment has been taken offline to minimize ongoing AWS costs (~$57/month), all source code, infrastructure configurations, and documentation are available in this repository. The application can be redeployed to AWS in approximately 5 minutes using the automated CI/CD pipeline and Terraform scripts provided.
